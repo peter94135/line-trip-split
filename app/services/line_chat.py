@@ -1,0 +1,573 @@
+"""LINE 指令分派。所有帳本變更由收件匣在同一筆交易中提交。"""
+
+import re
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from urllib.parse import parse_qs, quote
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import update
+from sqlmodel import Session, select
+
+from app.config import get_settings
+from app.models import Expense, LineChat, LineDelivery, Member, Transfer, Trip, TripMember, utcnow
+from app.services import fx, gemini, line, line_draft, line_edit, line_settlement, trip_stats, trips
+from app.services.line_parse import (
+    RECORD, CommandError, Draft, IncomingText, incoming_text, is_command, money, normalize, parse_quick,
+    parse_repayment, parse_trip,
+)
+
+HELP = (
+    "旅伴分帳\n"
+    "在群組傳「開帳本 京都 11/20-11/25 日幣」，旅伴可點回覆中的連結加入，也可傳「加入」。\n"
+    "記帳：記 晚餐 3000\n"
+    "收據：先傳「記」再傳照片，或先傳照片再說「記 這張」。\n"
+    "指定付款與分攤：記 小明付 計程車 800 我和小華\n"
+    "還款：已還 小明 1200｜公費：交公費 小明 5000\n"
+    "退款：記 押金退回 5000 小明收\n"
+    "查詢：帳本、成員、明細、結算、我欠多少、統計、我的統計\n"
+    "旅行結束：結束帳本"
+)
+PHOTO_REQUEST = re.compile(r"^(?:這張(?:照片|收據|發票)?|照片|收據|發票)(?=$|[\s,:])")
+
+
+def reply(text: str, buttons: list[line.Button] | None = None) -> list[dict]:
+    return [line.text_message(text, buttons)]
+
+
+def interested(event: dict) -> bool:
+    source = event.get("source") or {}
+    kind = event.get("type")
+    if source.get("type") == "user" and source.get("userId"):
+        return kind in ("follow", "message", "postback")
+    if source.get("type") != "group" or not source.get("groupId"):
+        return False
+    if kind in ("join", "leave", "memberJoined", "postback"):
+        return True
+    message = event.get("message") or {}
+    if kind != "message" or not source.get("userId"):
+        return False
+    if message.get("type") != "text":
+        return message.get("type") == "image" and bool(get_settings().gemini_api_key)
+    text = incoming_text(message)
+    return (text.addressed or is_command(text.text) or text.text in line_draft.CONFIRM
+            or line_draft.correction(text.text) is not None)
+
+
+def _member(session: Session, user_id: str) -> Member | None:
+    return session.exec(select(Member).where(Member.line_user_id == user_id)).first()
+
+
+def _profile_name(user_id: str, group_id: str | None) -> str | None:
+    name = line.get_profile(user_id, group_id).get("displayName")
+    return name if isinstance(name, str) and name.strip() else None
+
+
+def _event_time(event: dict) -> datetime:
+    try:
+        return datetime.fromtimestamp(event["timestamp"] / 1000, UTC)
+    except (KeyError, TypeError, ValueError, OSError, OverflowError):
+        return utcnow()
+
+
+def _enroll(session: Session, trip: Trip, user_id: str, group_id: str | None,
+            mentioned: dict[str, tuple[str | None, str]]) -> tuple[int, dict[str, int]]:
+    for target_id, label in mentioned.values():
+        if not target_id:
+            raise CommandError(f"LINE 沒有提供「{label}」的身分，請對方先傳「加入」，再用名稱分攤。")
+    user_ids = dict.fromkeys([user_id, *(target_id for target_id, _ in mentioned.values())])
+    names = {target_id: _profile_name(target_id, group_id) for target_id in user_ids}
+    for target_id, label in mentioned.values():
+        names[target_id] = names[target_id] or label
+    members = {target_id: trips.ensure_member(session, target_id, name).id for target_id, name in names.items()}
+    for member_id in members.values():
+        trips.enroll(session, trip.id, member_id)
+    return members[user_id], {key: members[target_id] for key, (target_id, _) in mentioned.items()}
+
+
+def _open(session: Session, text: str, group_id: str | None, user_id: str, when: datetime) -> list[dict]:
+    if group_id and (open_trip := trips.open_in_group(session, group_id)):
+        return _already_open(open_trip)
+    timezone = get_settings().tz
+    name, start, end, currency = parse_trip(text, when.astimezone(ZoneInfo(timezone)).date())
+    profile = _profile_name(user_id, group_id)
+    if group_id:
+        # 查 LINE 暱稱期間，網頁可能已重新開啟同群組的帳本。
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        if open_trip := trips.open_in_group(session, group_id):
+            return _already_open(open_trip)
+    creator = trips.ensure_member(session, user_id, profile)
+    trip = Trip(name=name, line_group_id=group_id, start_date=start, end_date=end,
+                timezone=timezone, default_currency=currency, created_by=creator.id)
+    session.add(trip)
+    session.flush()
+    trips.enroll(session, trip.id, creator.id)
+    if group_id:
+        join = _group_invite(trip) or "\n請每位成員傳「加入」。"
+    else:
+        _select_private(session, user_id, trip.id)
+        join = _trip_link(trip, label="開啟帳本：")
+    return reply(f"已開帳本「{trip.name}」｜記帳幣別 {trip.default_currency}｜結算幣別 {trip.settle_currency}"
+                 f"{join}\n開始記帳可傳「記 晚餐 3000」。")
+
+
+def _already_open(trip: Trip) -> list[dict]:
+    return reply(f"群組已有進行中的「{trip.name}」。請先結束目前的帳本。" + _group_invite(trip))
+
+
+def _group_invite(trip: Trip) -> str:
+    settings = get_settings()
+    if not settings.liff_id or not settings.line_login_channel_id:
+        return ""
+    return f"\n開啟帳本，登入後即加入：\n{trips.invite_url(trip, settings.liff_id)}"
+
+
+def _private_choices(session: Session, user_id: str, *, include_closed: bool = False) -> list[Trip]:
+    query = select(Trip).join(TripMember, TripMember.trip_id == Trip.id).join(
+        Member, Member.id == TripMember.member_id,
+    ).where(Member.line_user_id == user_id, Trip.deleted_at.is_(None))
+    if not include_closed:
+        query = query.where(Trip.status == "open")
+    return list(session.exec(query.order_by((Trip.status == "open").desc(), Trip.id.desc())).all())
+
+
+def _select_private(session: Session, user_id: str, trip_id: int) -> None:
+    chat = session.get(LineChat, user_id)
+    if chat is None:
+        session.add(LineChat(line_user_id=user_id, selected_trip_id=trip_id))
+    else:
+        chat.selected_trip_id = trip_id
+        chat.updated_at = utcnow()
+
+
+def _pick_private(choices: list[Trip]) -> list[dict]:
+    if not choices:
+        return reply("目前沒有進行中的帳本。請在旅伴群組傳「加入」，或傳「開帳本 京都」。")
+    options = [(trip.name, f"trip={trip.id}") for trip in choices]
+    return reply("請選擇帳本，也可輸入「帳本 帳本名稱」。\n" + "\n".join(trip.name for trip in choices), options)
+
+
+def _trip_header(trip: Trip) -> str:
+    dates = " ～ ".join(day.isoformat() for day in (trip.start_date, trip.end_date) if day)
+    return f"{trip.name}{f'｜{dates}' if dates else ''}｜{'進行中' if trip.status == 'open' else '已結束'}"
+
+
+def _trip_link(trip: Trip, *, tab: str = "", label: str = "") -> str:
+    liff_id = get_settings().liff_id
+    if not liff_id:
+        return ""
+    url = f"https://liff.line.me/{quote(liff_id, safe='')}?trip={trip.id}"
+    return "\n" + label + url + (f"&tab={tab}" if tab else "")
+
+
+def _settle(session: Session, trip: Trip, speaker: int, *, personal: bool = False, closing: bool = False) -> list[dict]:
+    result = trips.total(session, trip)
+    roster = trips.people(session, trip.id)
+    label = lambda member_id: "我" if personal and member_id == speaker else trips.name_of(roster, member_id)
+    fmt = lambda amount: money(amount, trip.settle_currency)
+    lines = []
+    missing = [f"支出 #{key}" for key in result.missing_expense_ids] + [f"還款 #{key}" for key in result.missing_transfer_ids]
+    if missing:
+        lines.append("⚠️ 以下紀錄待換算，暫未計入結算：" + "、".join(missing))
+    lines.append(f"{_trip_header(trip)}｜共 {fmt(result.total)}")
+    for member_id in ([speaker] if personal else roster):
+        lines.append(f"{label(member_id)}　付 {fmt(result.paid.get(member_id, 0))}｜分擔 {fmt(result.owed.get(member_id, 0))}")
+    payments = [f"{label(payment.from_id)} → {label(payment.to_id)}　{fmt(payment.amount)}"
+                for payment in result.payments if not personal or speaker in (payment.from_id, payment.to_id)]
+    lines.extend(["結算", *(payments or ["目前無須轉帳"])])
+    if personal:
+        link = _trip_link(trip, tab="settle", label="結算明細：")
+    elif closing:
+        link = _trip_link(trip, tab="stats", label="統計：")
+    else:
+        link = _trip_link(trip)
+    return reply("\n".join(lines) + link)
+
+
+def _statistics(session: Session, trip: Trip, speaker: int, *, personal: bool) -> list[dict]:
+    stats = trip_stats.calculate(session, trip)
+    currency = stats["currency"]
+    if personal:
+        total = stats["by_member"][speaker]["owed"]
+        lines = [f"{trip.name}｜我的分擔 {money(total, currency)}"]
+        for row in stats["by_category"]:
+            category = row["category"]
+            amounts = stats["by_member_category"][category].get(speaker)
+            if amounts and amounts["owed"]:
+                lines.append(f'{category}　{money(amounts["owed"], currency)}')
+    else:
+        lines = [f'{trip.name}｜總花費 {money(stats["total"], currency)}']
+        for row in stats["by_category"][:5]:
+            lines.append(f'{row["category"]}　{money(row["amount"], currency)}（{row["percent"]:g}%）')
+    if stats["missing_count"]:
+        lines.append(f'{stats["missing_count"]} 筆缺匯率未計入')
+    return reply("\n".join(lines) + _trip_link(trip, tab="stats", label="統計："))
+
+
+def _persist(session: Session, trip: Trip, speaker: int, roster: dict, pending: line_draft.Pending,
+             quotes: list[tuple[float | None, float | None]]) -> list[dict]:
+    messages = []
+    for draft, quoted in zip(pending.expenses, quotes, strict=True):
+        currency, shares, payer_id = draft.currency, draft.shares, draft.payer_id
+        entry = trips.record_expense(session, trip.id, item=draft.item, amount=draft.amount, currency=currency,
+                                     quote=quoted, spent_on=draft.spent_on, payer_id=payer_id,
+                                     creator_id=speaker, shares=shares, source_text=pending.text,
+                                     source=pending.source, merchant=draft.merchant, category=draft.category,
+                                     kind=draft.kind)
+        messages.append(line_edit.expense_card(session, trip, entry, roster, "已記"))
+    return messages
+
+
+def _chat(session: Session, key: str) -> LineChat:
+    chat = session.get(LineChat, key)
+    if chat is None:
+        chat = LineChat(line_user_id=key)
+        session.add(chat)
+    return chat
+
+
+def _propose(session: Session, trip: Trip, group_id: str | None, user_id: str, key: str, incoming: IncomingText,
+             raw: str, when: datetime, *, quick: list[Draft] | None = None, photo_id: str | None = None,
+             previous: line_draft.Pending | None = None) -> list[dict]:
+    today = when.astimezone(ZoneInfo(trip.timezone)).date()
+    drafts, source = quick, "line_text"
+    if get_settings().gemini_api_key:
+        roster = trips.people(session, trip.id)
+        members = [dict(nickname=membership.nickname, line_name=member.line_name, active=membership.active,
+                        speaker=member.line_user_id == user_id) for membership, member in roster.values()]
+        aliases = {f"提及{index}": marker for index, marker in enumerate(incoming.mentions, 1)}
+        text = incoming.text
+        for alias, marker in aliases.items():
+            text = text.replace(marker, alias)
+        try:
+            image = line.get_content(photo_id, max_bytes=gemini.MAX_IMAGE_BYTES) if photo_id else None
+            parsed = gemini.parse(text, today=today, currency=trip.default_currency, members=members,
+                                  mentions={alias: incoming.mentions[marker][1] for alias, marker in aliases.items()},
+                                  image=image, previous=line_draft.previous_entries(previous, roster) if previous else None)
+        except line.LineError as exc:
+            raise CommandError(str(exc)) from exc
+        except gemini.GeminiError as exc:
+            if drafts is None:
+                raise CommandError(str(exc)) from exc
+        else:
+            source = "line_photo" if photo_id or (previous and previous.source == "line_photo") else "gemini"
+            drafts = line_draft.from_gemini(parsed, photo=source == "line_photo", mention_tokens=aliases)
+    if drafts is None:
+        raise CommandError("目前可先用單筆文字記帳，例如「記 晚餐 3000」。")
+
+    speaker, mentions = _enroll(session, trip, user_id, group_id, incoming.mentions)
+    _require_open(session, trip)
+    roster = trips.people(session, trip.id)
+    entries = line_draft.prepare(drafts, trip, today, roster, speaker, mentions)
+    chat = _chat(session, key)
+    if photo_id:
+        chat.listen_until, chat.listen_text, chat.listen_mentions = None, None, None
+        if chat.recent_image_at and chat.recent_image_at <= when:
+            chat.recent_image_id, chat.recent_image_at = None, None
+    pending = line_draft.Pending(trip_id=trip.id, source=source, text=raw or None, expenses=entries)
+    return line_draft.card(session, chat, pending, trip, roster)
+
+
+def _record(session: Session, trip: Trip, group_id: str | None, user_id: str, key: str, incoming: IncomingText,
+            raw: str, when: datetime) -> list[dict]:
+    try:
+        drafts = parse_quick(incoming.text)
+    except CommandError as exc:
+        if not get_settings().gemini_api_key:
+            raise exc
+        return _propose(session, trip, group_id, user_id, key, incoming, raw, when)
+    if len(drafts) > line_draft.MAX_EXPENSES:
+        raise CommandError("一次最多記五筆，請分開傳送。")
+    if len(drafts) > 1:
+        return _propose(session, trip, group_id, user_id, key, incoming, raw, when, quick=drafts)
+
+    draft = drafts[0]
+    currency = draft.currency or trip.default_currency
+    settle_currency = trip.settle_currency
+    quotes = [trips.quote_amount(trip, draft.amount, currency)]
+    speaker, mentions = _enroll(session, trip, user_id, group_id, incoming.mentions)
+    _require_open(session, trip, settle_currency)
+    roster = trips.people(session, trip.id)
+    today = when.astimezone(ZoneInfo(trip.timezone)).date()
+    entries = line_draft.prepare(drafts, trip, today, roster, speaker, mentions)
+    chat = session.get(LineChat, key)
+    if line_draft.get(chat):
+        line_draft.clear(chat)
+    return _persist(session, trip, speaker, roster, line_draft.Pending(
+        trip_id=trip.id, source="line_text", text=raw, expenses=entries,
+    ), quotes)
+
+
+def _draft_action(session: Session, trip: Trip, actor: Member | None, group_id: str | None, user_id: str,
+                  chat: LineChat, pending: line_draft.Pending, action: str, incoming: IncomingText,
+                  when: datetime) -> list[dict]:
+    if action == "cancel":
+        line_draft.clear(chat)
+        return reply("已取消這份記帳草稿。")
+    if pending.trip_id != trip.id or trip.status != "open" or actor is None:
+        raise CommandError("這份草稿的帳本已切換或結束，請重新記帳。")
+    if action == "edit":
+        text = line_draft.correction(incoming.text)
+        if not text:
+            return reply("請說明要修改的內容，例如「改成金額 1200」。")
+        return _propose(session, trip, group_id, user_id, chat.line_user_id, incoming, text, when, previous=pending)
+
+    settle_currency = trip.settle_currency
+    quotes = [trips.quote_amount(trip, entry.amount, entry.currency) for entry in pending.expenses]
+    line_draft.clear(chat)
+    session.flush()
+    _require_open(session, trip, settle_currency)
+    roster = trips.people(session, trip.id)
+    if actor.id not in roster or any(
+        entry.payer_id not in roster or any(
+            share.member_id not in roster or (not roster[share.member_id][0].active and share.member_id != entry.payer_id)
+            for share in entry.shares
+        ) for entry in pending.expenses
+    ):
+        raise CommandError("分攤成員有變動，請重新送出記帳指令。")
+    return _persist(session, trip, actor.id, roster, pending, quotes)
+
+
+def _photo(session: Session, trip: Trip, group_id: str | None, user_id: str, key: str, image_id: str,
+           when: datetime) -> list[dict]:
+    chat = session.get(LineChat, key)
+    same_trip = chat and chat.photo_trip_id == trip.id
+    if same_trip and chat.listen_until and chat.listen_until - line_draft.PHOTO_WAIT <= when <= chat.listen_until:
+        prompt = chat.listen_text or "讀取這張收據"
+        incoming = IncomingText(prompt, False, chat.listen_mentions or {})
+        return _propose(session, trip, group_id, user_id, key, incoming, "", when,
+                        photo_id=image_id)
+    if not same_trip or not chat.recent_image_at or when >= chat.recent_image_at:
+        chat = _chat(session, key)
+        if not same_trip:
+            chat.photo_trip_id = trip.id
+            chat.listen_until, chat.listen_text, chat.listen_mentions = None, None, None
+        chat.recent_image_id, chat.recent_image_at = image_id, when
+    return []
+
+
+def _photo_request(session: Session, trip: Trip, group_id: str | None, user_id: str, key: str,
+                   incoming: IncomingText, when: datetime) -> list[dict] | None:
+    command = RECORD.match(incoming.text)
+    if not command:
+        return None
+    body = incoming.text[command.end():]
+    use_recent = PHOTO_REQUEST.match(body) is not None
+    if body and not use_recent:
+        return None
+    if not get_settings().gemini_api_key:
+        return reply("目前可先用文字記帳，例「記 晚餐 3000」。")
+    chat = session.get(LineChat, key)
+    if use_recent and chat and chat.photo_trip_id == trip.id and chat.recent_image_id and chat.recent_image_at and (
+        timedelta(0) <= when - chat.recent_image_at <= line_draft.RECENT_PHOTO
+    ):
+        return _propose(session, trip, group_id, user_id, key, incoming, incoming.text, when,
+                        photo_id=chat.recent_image_id)
+    chat = _chat(session, key)
+    if chat.photo_trip_id != trip.id:
+        chat.photo_trip_id = trip.id
+        chat.recent_image_id, chat.recent_image_at = None, None
+    chat.listen_until, chat.listen_text = when + line_draft.PHOTO_WAIT, incoming.text if use_recent else None
+    chat.listen_mentions = incoming.mentions or None
+    return reply("請在 2 分鐘內傳收據照片，我會先回覆待確認的明細。")
+
+
+def _repay(session: Session, trip: Trip, group_id: str | None, user_id: str, incoming: IncomingText) -> list[dict]:
+    name, amount, currency = parse_repayment(incoming.text)
+    currency = currency or trip.settle_currency
+    settle_currency = trip.settle_currency
+    rate, value = trips.quote_amount(trip, amount, currency)
+    speaker, mentions = _enroll(session, trip, user_id, group_id, incoming.mentions)
+    _require_open(session, trip, settle_currency)
+    roster = trips.people(session, trip.id)
+    recipient = trips.resolve(roster, speaker, name, mentions)
+    if recipient == speaker:
+        raise CommandError("還款對象必須是另一位帳本成員。")
+    session.add(Transfer(trip_id=trip.id, from_id=speaker, to_id=recipient, amount=float(amount),
+                         currency=currency, rate=rate, amount_settle=value, created_by=speaker))
+    pending = "（待換算）" if value is None else ""
+    if incoming.text == "交公費" or incoming.text.startswith("交公費 "):
+        return reply(f"已記：你交給{trips.name_of(roster, recipient)}公費 {money(amount, currency)}{pending}")
+    return reply(f"已記還款：{trips.name_of(roster, speaker)} → {trips.name_of(roster, recipient)} "
+                 f"{money(amount, currency)}{pending}")
+
+
+def _require_open(session: Session, trip: Trip, settle_currency: str | None = None) -> None:
+    # 已取得寫入鎖，確認別的對話沒有在查匯率或名稱期間關閉帳本。
+    session.refresh(trip, attribute_names=["status", "settle_currency"])
+    if trip.status != "open":
+        raise CommandError("這本帳已結束。傳「開帳本 旅程名稱」可開新帳本。")
+    if settle_currency is not None and trip.settle_currency != settle_currency:
+        raise CommandError("帳本的結算幣別剛變更，請重新送出指令。")
+
+
+def _details(session: Session, trip: Trip) -> list[dict]:
+    roster = trips.people(session, trip.id)
+    rows = session.exec(select(Expense).where(Expense.trip_id == trip.id, Expense.deleted_at.is_(None))
+                        .order_by(Expense.spent_on.desc(), Expense.id.desc()).limit(15)).all()
+    lines = [f"{trip.name}｜最近 15 筆"]
+    for row in rows:
+        kind_label, verb = ("退款｜", "收") if row.kind == "refund" else ("", "付")
+        lines.append(f"{row.spent_on:%m/%d} {kind_label}{row.item}　{money(row.amount, row.currency)}｜{trips.name_of(roster, row.payer_id)}{verb}")
+    if not rows:
+        lines.append("目前沒有支出。")
+    return reply("\n".join(lines) + _trip_link(trip))
+
+
+def _read_command(session: Session, trip: Trip, speaker: int, user_id: str, text: str) -> list[dict]:
+    if text == "帳本":
+        link = _group_invite(trip) if trip.line_group_id and trip.status == "open" else ""
+        return reply(f"{_trip_header(trip)}\n記帳幣別 {trip.default_currency}｜結算幣別 {trip.settle_currency}"
+                     + (link or _trip_link(trip)))
+    if text in ("加入", "成員"):
+        roster = trips.people(session, trip.id)
+        if text == "加入":
+            status = "已加入" if roster[speaker][0].active else "已在帳本內，目前分攤已停用"
+            return reply(f"{status}「{trip.name}」。")
+        labels = [trips.name_of(roster, key) + ("（已停用）" if not row[0].active else "") for key, row in roster.items()]
+        return reply(f"{trip.name}｜成員 {len(roster)} 人\n" + "\n".join(labels))
+    if text == "明細":
+        return _details(session, trip)
+    if text == "結算":
+        return [line_settlement.card(session, trip)]
+    if text == "結束帳本":
+        if trip.status == "closed":
+            return reply(f"「{trip.name}」已結束。")
+        if trip.created_by != speaker and get_settings().line_admin_user_id != user_id:
+            raise CommandError("請由帳本建立者或管理員結束帳本。")
+        trip.status = "closed"
+        trips.audit(session, trip.id, speaker, "line", "結束帳本")
+    return _settle(session, trip, speaker, personal=text == "我欠多少", closing=text == "結束帳本")
+
+
+def handle(session: Session, event: dict) -> list[dict]:
+    source = event.get("source") or {}
+    group_id, user_id = source.get("groupId"), source.get("userId")
+    kind = event.get("type")
+    if kind in ("join", "follow"):
+        return reply(HELP)
+    if kind == "memberJoined":
+        return reply("歡迎加入群組。已有帳本時，傳「加入」即可參與分攤；傳「說明」查看用法。")
+    if kind == "leave" and group_id:
+        session.execute(update(LineDelivery).where(LineDelivery.recipient == group_id, LineDelivery.status == "pending")
+                        .values(status="failed", messages=None))
+        return []
+    if not user_id:
+        return []
+    action = None
+    nonce = None
+    if kind == "postback":
+        data = {key: values[0] for key, values in parse_qs((event.get("postback") or {}).get("data", "")).items()}
+        if "settle" in data:
+            return [line_settlement.handle(session, group_id, user_id, data)]
+        if "exp" in data:
+            return line_edit.handle(session, group_id, user_id, data)
+        if not group_id and "trip" in data:
+            choices = _private_choices(session, user_id, include_closed=True)
+            match = next((trip for trip in choices if str(trip.id) == data["trip"]), None)
+            if not match:
+                return _pick_private(choices)
+            _select_private(session, user_id, match.id)
+            return reply(f"已選擇「{match.name}」。")
+        if data.get("draft") in ("confirm", "cancel"):
+            action, nonce = data["draft"], data.get("nonce", "")
+            message = {"type": "text", "text": ""}
+        elif data.get("cmd") == "members":
+            message = {"type": "text", "text": "成員"}
+        else:
+            return []
+    else:
+        message = event.get("message") or {}
+    image_id = message.get("id") if message.get("type") == "image" else None
+    if message.get("type") != "text" and not image_id:
+        return [] if group_id else reply("請用文字或收據照片記帳。傳「說明」查看用法。")
+    incoming = IncomingText("", False, {}) if image_id else incoming_text(message)
+    text = incoming.text
+    if text == "說明":
+        return reply(HELP)
+    if text.lower() == "我的id":
+        return reply("請私訊我傳「我的ID」。" if group_id else f"你的 LINE User ID：\n{user_id}")
+    if text == "開帳本" or text.startswith("開帳本 "):
+        return _open(session, text, group_id, user_id, _event_time(event))
+
+    key = f"{group_id}:{user_id}" if group_id else user_id
+    if action is None:
+        action = line_draft.CONFIRM.get(text)
+        if action is None and line_draft.correction(text) is not None:
+            action = "edit"
+    if action:
+        chat = session.get(LineChat, key)
+        pending = line_draft.get(chat)
+        if not pending or (nonce is not None and chat.draft_nonce != nonce):
+            return reply("這份記帳草稿已失效。") if kind == "postback" else []
+        draft_trip = session.get(Trip, pending.trip_id)
+        if not draft_trip or draft_trip.deleted_at is not None or (group_id and draft_trip.line_group_id != group_id):
+            raise CommandError("找不到這份草稿的帳本，請重新記帳。")
+        if not group_id and chat.selected_trip_id not in (None, draft_trip.id):
+            raise CommandError("這份草稿屬於另一個帳本，請先選回該帳本。")
+        return _draft_action(session, draft_trip, _member(session, user_id), group_id, user_id, chat, pending,
+                             action, incoming, _event_time(event))
+
+    statistics = text in ("統計", "我的統計")
+    if statistics:
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+    actor = _member(session, user_id)
+    if group_id:
+        trip = session.exec(select(Trip).where(Trip.line_group_id == group_id, Trip.deleted_at.is_(None))
+                            .order_by((Trip.status == "open").desc(), Trip.id.desc()).limit(1)).first()
+        if trip is None:
+            return [] if image_id else reply("這個群組還沒有帳本。傳「開帳本 京都 11/20-11/25 日幣」即可建立。")
+        membership = session.get(TripMember, (trip.id, actor.id)) if actor else None
+        if not image_id and not is_command(text) and not membership:
+            return reply("請傳「加入」加入這本帳，再開始記帳。")
+    else:
+        include_closed = statistics or text in ("結算", "我欠多少") or text.startswith("帳本 ")
+        choices = _private_choices(session, user_id, include_closed=include_closed)
+        if text.startswith("帳本 "):
+            name = normalize(text.removeprefix("帳本 "))
+            matches = [trip for trip in choices if normalize(trip.name) == name]
+            if len(matches) != 1:
+                return _pick_private(choices)
+            _select_private(session, user_id, matches[0].id)
+            return reply(f"已選擇「{matches[0].name}」。")
+        chat = session.get(LineChat, user_id)
+        trip = choices[0] if len(choices) == 1 else next(
+            (item for item in choices if chat and item.id == chat.selected_trip_id), None,
+        )
+        if trip is None:
+            return [] if image_id else _pick_private(choices)
+        membership = session.get(TripMember, (trip.id, actor.id))
+
+    when = _event_time(event)
+    if image_id:
+        if trip.status != "open" or not get_settings().gemini_api_key:
+            return []
+        return _photo(session, trip, group_id, user_id, key, image_id, when)
+
+    if statistics:
+        if not membership:
+            return reply("請先傳「加入」加入帳本，再查看統計。" if trip.status == "open"
+                         else "這本帳已結束，請由原帳本成員查詢。")
+        return _statistics(session, trip, actor.id, personal=text == "我的統計")
+
+    reading = text in ("帳本", "成員", "明細", "結算", "我欠多少", "結束帳本", "加入")
+    if trip.status == "closed":
+        if not reading or text == "加入":
+            return reply("這本帳已結束。傳「開帳本 旅程名稱」可開新帳本。")
+        if not membership:
+            return reply("這本帳已結束，請由原帳本成員查詢。")
+        return _read_command(session, trip, actor.id, user_id, text)
+    if reading:
+        # 只有建立者與管理員能結束帳本，其他人不會因嘗試結束而加入。
+        if text == "結束帳本" and not membership and get_settings().line_admin_user_id != user_id:
+            raise CommandError("請由帳本建立者或管理員結束帳本。")
+        speaker, _ = _enroll(session, trip, user_id, group_id, {})
+        return _read_command(session, trip, speaker, user_id, text)
+    if text in ("已還", "交公費") or text.startswith(("已還 ", "交公費 ")):
+        return _repay(session, trip, group_id, user_id, incoming)
+    if RECORD.match(text) or (text and (not group_id or incoming.addressed)):
+        photo = _photo_request(session, trip, group_id, user_id, key, incoming, when)
+        if photo is not None:
+            return photo
+        return _record(session, trip, group_id, user_id, key, incoming, message["text"], when)
+    return reply(HELP) if incoming.addressed else []

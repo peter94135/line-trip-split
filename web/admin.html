@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#faf9f5" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141413" media="(prefers-color-scheme: dark)">
+  <link rel="icon" href="/assets/logo.svg?v=15" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png?v=15">
+  <title>旅伴分帳管理頁</title>
+  <link rel="stylesheet" href="/assets/style.css?v=15">
+  <script type="module" src="/assets/admin.js?v=15"></script>
+</head>
+<body>
+  <header class="topbar"><div class="frame top-inner">
+    <a class="brand" href="/liff/"><img class="brand-mark" src="/assets/logo.svg?v=15" alt="" width="38" height="38">旅伴分帳</a>
+    <button type="button" class="plain" id="logout" hidden>登出</button>
+  </div></header>
+  <main id="app" class="frame content">
+    <div class="intro"><p class="eyebrow">服務管理</p><h1>管理員登入</h1><p class="muted">查看帳本明細、操作紀錄、LINE 與 Gemini 狀態。</p></div>
+    <form id="login" class="card form compact">
+      <label>管理員密碼<input type="password" name="password" autocomplete="current-password" required maxlength="512"></label>
+      <p id="login-error" role="alert" class="error" hidden></p>
+      <button class="primary" type="submit">登入</button>
+    </form>
+  </main>
+  <p id="notice" class="toast" role="status" hidden></p>
+</body>
+</html>

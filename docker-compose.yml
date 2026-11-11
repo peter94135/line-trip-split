@@ -1,0 +1,57 @@
+name: trip-split
+
+services:
+  ts:
+    image: tailscale/tailscale:stable
+    hostname: trip-split
+    restart: unless-stopped
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_AUTH_ONCE: "true"
+      TS_HOSTNAME: trip-split
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/funnel.json
+      TS_USERSPACE: "true"
+      # 共用網路內的健康檢查，應用程式用它確認自己仍在 sidecar 目前的網路命名空間。
+      TS_ENABLE_HEALTH_CHECK: "true"
+      TS_LOCAL_ADDR_PORT: "127.0.0.1:9002"
+    ports:
+      # 應用程式共用 sidecar 的網路，因此由 sidecar 發布本機連接埠。
+      - "127.0.0.1:8082:8000"
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - ./tailscale:/config:ro
+
+  trip-split:
+    build:
+      context: .
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-}
+    image: trip-split:latest
+    container_name: trip-split
+    restart: unless-stopped
+    network_mode: service:ts
+    depends_on:
+      ts:
+        condition: service_started
+        restart: true
+    environment:
+      TZ: ${TZ:-Asia/Taipei}
+      TS_HEALTH_URL: http://127.0.0.1:9002/healthz
+      LINE_CHANNEL_SECRET: ${LINE_CHANNEL_SECRET:-}
+      LINE_CHANNEL_ACCESS_TOKEN: ${LINE_CHANNEL_ACCESS_TOKEN:-}
+      LINE_ADMIN_USER_ID: ${LINE_ADMIN_USER_ID:-}
+      LINE_LOGIN_CHANNEL_ID: ${LINE_LOGIN_CHANNEL_ID:-}
+      LIFF_ID: ${LIFF_ID:-}
+      APP_SECRET: ${APP_SECRET:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash}
+      GEMINI_THINKING_LEVEL: ${GEMINI_THINKING_LEVEL-minimal}
+      GEMINI_FALLBACK_MODELS: ${GEMINI_FALLBACK_MODELS-gemini-3-flash-preview,gemini-3.5-flash-lite,gemini-3.1-flash-lite}
+      GEMINI_TIMEOUT_S: ${GEMINI_TIMEOUT_S:-25}
+    volumes:
+      - ./data:/app/data
+
+volumes:
+  tailscale-state:

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#faf9f5" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141413" media="(prefers-color-scheme: dark)">
+  <link rel="icon" href="/assets/logo.svg?v=15" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png?v=15">
+  <title>旅伴分帳</title>
+  <link rel="stylesheet" href="/assets/style.css?v=15">
+  <script defer src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+  <script type="module" src="/assets/liff.js?v=15"></script>
+</head>
+<body>
+  <svg class="symbols" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M5 4h13a1 1 0 0 1 1 1v15H7a2 2 0 0 1 0-4h12M5 18V6a2 2 0 0 1 2-2m2 4h6m-6 4h4"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M5 6h14M5 12h14M5 18h14"/></symbol>
+    <symbol id="i-stats" viewBox="0 0 24 24"><path d="M4 4v16h16M8 16v-4m5 4V8m5 8V5"/></symbol>
+    <symbol id="i-people" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2m2-15a3 3 0 0 1 0 6m4 9v-2a4 4 0 0 0-3-4"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M5 6h14M5 12h14M5 18h14"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="11" cy="18" r="2"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></symbol>
+    <symbol id="i-next" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h15m-6-6 6 6-6 6"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11m-4-4 4 4 4-4M5 17v3h14v-3"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="M10 3.5l1.6 4.4L16 9.5l-4.4 1.6L10 15.5l-1.6-4.4L4 9.5l4.4-1.6zM17.5 14l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></symbol>
+    <symbol id="i-scale" viewBox="0 0 24 24"><path d="M12 4v16M7 20h10M5 7h14M5 7l-2.5 6a2.5 2.5 0 0 0 5 0zM19 7l-2.5 6a2.5 2.5 0 0 0 5 0z"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></symbol>
+  </svg>
+  <header class="topbar"><div class="frame top-inner">
+    <button id="home" class="brand" type="button" data-action="list" aria-label="我的帳本"><img class="brand-mark" src="/assets/logo.svg?v=15" alt="" width="38" height="38">
+      <span id="trip-title" class="trip-title">旅伴分帳</span><svg class="switch-icon" aria-hidden="true"><use href="#i-down"/></svg></button>
+    <span class="top-actions"><span id="trip-status"></span><button id="refresh" class="plain" type="button" data-action="refresh" hidden>重新整理</button></span>
+  </div></header>
+  <main id="app" class="frame content" aria-busy="true">
+    <div class="intro"><p class="eyebrow">旅程帳本</p><h1>正在開啟帳本</h1><p class="muted">請稍等片刻。</p></div>
+  </main>
+  <nav id="tabs" class="tabbar" aria-label="帳本分頁" hidden><div class="frame tab-inner">
+    <button type="button" data-tab="manual"><svg aria-hidden="true"><use href="#i-plus"/></svg>手動記帳</button>
+    <button type="button" data-tab="expenses"><svg aria-hidden="true"><use href="#i-list"/></svg>明細</button>
+    <button type="button" data-tab="ai" class="tab-main"><svg aria-hidden="true"><use href="#i-spark"/></svg>AI 記帳</button>
+    <button type="button" data-tab="settle"><svg aria-hidden="true"><use href="#i-scale"/></svg>結算</button>
+    <button type="button" data-tab="trip"><svg aria-hidden="true"><use href="#i-book"/></svg>帳本</button>
+  </div></nav>
+  <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+  <p id="notice" class="toast" role="status" hidden></p>
+</body>
+</html>
