@@ -16,3 +16,11 @@ def db_engine(tmp_path, monkeypatch):
         engine.dispose()
         get_engine.cache_clear()
         get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def clear_profile_cache():
+    from app.services import line_chat
+    line_chat._profile_cache.clear()
+    yield
+    line_chat._profile_cache.clear()

@@ -72,6 +72,10 @@ def mention(text, label, user, *, bot=False):
             "length": len(label.encode("utf-16-le")) // 2, "userId": user, "isSelf": bot}
 
 
+def quick(message):
+    return [item["action"]["label"] for item in message.get("quickReply", {}).get("items", [])]
+
+
 def buttons(message):
     if message["type"] == "flex":
         return {item["action"]["label"]: item["action"]["data"]
@@ -445,8 +449,8 @@ def test_record_and_draft_cards_keep_buttons(bot):
     send("開帳本 京都")
     send("加入", user="U-ming")
     saved = send("記 晚餐 1000")[0]
-    # 按鈕放在 Flex 卡片內，不會像 Quick Reply 一樣在下一則訊息後消失。
-    assert saved["type"] == "flex" and "quickReply" not in saved
+    # 按鈕放在 Flex 卡片內，不會像 Quick Reply 一樣在下一則訊息後消失；Quick Reply 只放一鍵修正。
+    assert saved["type"] == "flex" and quick(saved) == ["小明付"]
     assert saved["altText"].startswith("已記：晚餐") and "｜餐飲" in saved["altText"]
     assert list(buttons(saved)) == ["改分攤", "改付款人", "改類別", "刪除"]
     confirm = send(postback=buttons(saved)["刪除"])[0]
@@ -462,3 +466,66 @@ def test_record_and_draft_cards_keep_buttons(bot):
     assert actions[2]["inputOption"] == "openKeyboard" and actions[2]["fillInText"] == "改成 "
     assert send(postback=actions[2]["data"]) == []
     assert "已記" in send(postback=actions[0]["data"])[0]["text"]
+
+
+def test_one_tap_fixes_on_saved_card(bot, db_engine):
+    _, _, send, _ = bot
+    send("開帳本 京都")
+    send("加入", user="U-ming")
+    saved = send("記 炎術 85")[0]
+    # 類別沒對到時，Quick Reply 列出付款人和類別，一鍵就能改。
+    assert "｜待分類" in saved["altText"]
+    assert quick(saved) == ["小明付", "餐飲", "交通", "住宿", "門票娛樂", "購物", "伴手禮", "雜支"]
+    fixes = {item["action"]["label"]: item["action"]["data"] for item in saved["quickReply"]["items"]}
+    paid = send(postback=fixes["小明付"])[0]
+    assert paid["altText"].startswith("已改付款人：炎術") and "\n小明付" in paid["altText"]
+    assert quick(paid)[0] == "阿傑付" and "餐飲" in quick(paid)
+    fixes = {item["action"]["label"]: item["action"]["data"] for item in paid["quickReply"]["items"]}
+    done = send(postback=fixes["餐飲"])[0]
+    assert "｜餐飲" in done["altText"] and quick(done) == ["阿傑付"]
+    # 改過的類別會記住，下次同一家店直接分對，也就不再列類別按鈕。
+    again = send("記 炎術 90")[0]
+    assert "｜餐飲" in again["altText"] and quick(again) == ["小明付"]
+
+
+def test_trip_default_payer(bot, db_engine):
+    _, _, send, _ = bot
+    send("開帳本 京都")
+    send("加入", user="U-ming")
+    assert "記帳的人" in send("預設付款人")[0]["text"]
+    assert "建立者" in send("預設付款人 阿傑", user="U-ming")[0]["text"]
+    assert send("預設付款人 小明")[0]["text"].startswith("預設付款人改為小明。")
+    assert "預設付款人 小明" in send("帳本")[0]["text"]
+    assert "\n小明付" in send("記 晚餐 1000")[0]["altText"]
+    assert "\n阿傑付" in send("記 我付 咖啡 200")[0]["altText"]
+    # 請客一定是記帳的人付。
+    assert "\n阿傑付" in send("記 宵夜 300 我請客")[0]["altText"]
+    assert send("預設付款人 取消")[0]["text"].startswith("預設付款人改為記帳的人。")
+    assert "\n阿傑付" in send("記 早餐 100")[0]["altText"]
+    with Session(db_engine) as session:
+        trip = session.exec(select(Trip)).one()
+        assert trip.default_payer_id is None
+
+
+def test_unknown_names_use_gemini_category_guess(bot, db_engine, monkeypatch):
+    _, _, send, _ = bot
+    send("開帳本 京都")
+    send("加入", user="U-ming")
+    asked = []
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    get_settings.cache_clear()
+
+    def generate(parts, thinking, **options):
+        asked.append(json.loads(parts[0])["item"])
+        assert options["kind"] == "Category"
+        return options["schema"](category="餐飲")
+
+    monkeypatch.setattr(gemini, "_generate", generate)
+    saved = send("記 喝喝茶 170")[0]
+    assert "｜餐飲" in saved["altText"] and asked == ["喝喝茶"]
+    # AI 猜的類別仍列出類別按鈕，猜錯一鍵改。
+    assert "交通" in quick(saved)
+    # 關鍵字對得到的不問 AI。
+    assert "｜交通" in send("記 加油 500")[0]["altText"] and asked == ["喝喝茶"]
+    with Session(db_engine) as session:
+        assert session.exec(select(Expense).where(Expense.item == "喝喝茶")).one().category_source == "gemini"

@@ -103,7 +103,7 @@ def incoming_text(message: dict) -> IncomingText:
 
 def is_command(text: str) -> bool:
     return text.lower() in COMMANDS or RECORD.match(text) is not None or any(
-        text == prefix or text.startswith(f"{prefix} ") for prefix in ("開帳本", "已還", "交公費", "帳本")
+        text == prefix or text.startswith(f"{prefix} ") for prefix in ("開帳本", "已還", "交公費", "帳本", "預設付款人")
     )
 
 

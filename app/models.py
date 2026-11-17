@@ -59,6 +59,8 @@ class Trip(SQLModel, table=True):
     ledger_version: int = 0
     # 網頁改帳時推播到 LINE 群組，會用到每月推播額度。
     notify_web_changes: bool = Field(default=True, sa_column_kwargs={"server_default": text("1")})
+    # 沒說誰付錢時的付款人；NULL 表示記帳的人。例如一人保管公費時設成他。
+    default_payer_id: int | None = Field(default=None, foreign_key="member.id")
     created_by: int | None = Field(default=None, foreign_key="member.id")
     created_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
     deleted_at: datetime | None = Field(default=None, sa_type=UTCDateTime)

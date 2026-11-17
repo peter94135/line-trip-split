@@ -1,4 +1,4 @@
-import { $, api, esc, notice } from "./common.js?v=15";
+import { $, api, esc, notice } from "./common.js?v=17";
 
 const app = $("#app");
 const logout = $("#logout");

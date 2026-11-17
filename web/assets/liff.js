@@ -1,6 +1,7 @@
-import { $, api, clearUndo, esc, notice, storage } from "./common.js?v=15";
+import { $, api, clearUndo, esc, notice, storage } from "./common.js?v=17";
 
 const TOKEN_KEY = "trip-split:token";
+const LINE_USER_KEY = "trip-split:line-user";
 const views = ["manual", "expenses", "ai", "settle", "trip"];
 // LINE 訊息與舊書籤裡的分頁名稱。
 const aliases = { overview: ["settle", "settle"], stats: ["settle", "stats"], members: ["trip"], settings: ["trip"] };
@@ -348,10 +349,12 @@ function memberList() {
 
 function settingsView() {
   const trip = state.trip;
+  const payerName = trip.default_payer_id ? nameOf(trip.default_payer_id) : "記帳的人";
   const rates = Object.entries(trip.fixed_rates).map(([code, rate]) => `${code} = ${rate}`).join("\n");
   if (!trip.can_manage || !isOpen()) {
     return `<section class="card stack"><h2>帳本設定</h2><p>日期 ${esc(dates(trip))}</p><p>時區 ${esc(trip.timezone)}</p>
       <p>記帳幣別 ${esc(trip.default_currency)} · 結算幣別 ${esc(trip.settle_currency)}</p><p class="small muted">固定匯率 ${rates ? esc(rates.replaceAll("\n", "、")) : "未設定"}</p>
+      <p class="small muted">預設付款人 ${esc(payerName)}</p>
       ${trip.line_group ? `<p class="small muted">網頁改帳通知 LINE 群組：${trip.notify_web_changes ? "開啟" : "關閉"}</p>` : ""}
       ${trip.can_manage && !isOpen() ? `<div class="actions">${button("重新開啟帳本", "reopen-trip", "primary")}${button("刪除帳本", "delete-trip", "danger")}</div>` : ""}</section>`;
   }
@@ -364,6 +367,9 @@ function settingsView() {
     ${trip.has_records ? '<p class="muted small">帳本已有紀錄，結算幣別已鎖定。</p>' : ""}
     <label>固定匯率<textarea name="fixed_rates" rows="4" spellcheck="false" placeholder="JPY = 0.2135">${esc(rates)}</textarea></label>
     <p class="muted small">每行填一種原幣與匯率，表示 1 單位原幣可換多少結算幣。已換算的紀錄會保留原匯率。</p>
+    <label>預設付款人<select name="default_payer_id"><option value="0">記帳的人</option>${trip.members.filter((member) => member.active)
+      .map((member) => `<option value="${member.id}" ${member.id === trip.default_payer_id ? "selected" : ""}>${esc(member.name)}</option>`).join("")}</select></label>
+    <p class="muted small">在 LINE 或網頁記帳沒說誰付時記在這個人身上，適合由一人先付或保管公費。說「我付」或請客時仍記在自己身上。</p>
     ${trip.line_group ? `<label class="check"><input type="checkbox" name="notify_web_changes" ${trip.notify_web_changes ? "checked" : ""}>網頁記帳或修改時通知 LINE 群組</label>
     <p class="muted small">每則通知會依群組人數用掉推播額度（每月 200 則）。在群組直接傳訊息記帳不受影響。</p>` : ""}
     <p class="error" role="alert" hidden></p><div class="actions"><button type="submit" class="primary">儲存設定</button>${button("結束帳本", "close-trip", "danger")}</div>
@@ -387,8 +393,8 @@ async function loadList() {
   render();
 }
 
-async function openTrip(id, tab = null) {
-  const trip = await call(`/api/trips/${id}`);
+async function openTrip(id, tab = null, preloaded = null) {
+  const trip = preloaded || await call(`/api/trips/${id}`);
   const sameTrip = new URLSearchParams(location.search).get("trip") === String(id);
   if (!sameTrip) state.ai = { text: "", busy: "", error: "", result: null };
   state.trip = trip;
@@ -547,7 +553,7 @@ function expenseFields(entry = null, kind = null) {
     <div class="fields"><label>金額<input name="amount" type="number" min="0.01" step="0.01" inputmode="decimal" required value="${esc(entry?.amount)}"></label>
     ${currencyField("幣別", "currency", entry?.currency || trip.default_currency)}</div>${currencyOptions()}
     <div class="fields"><label>日期<input name="spent_on" type="date" required value="${esc(entry?.spent_on || trip.today)}"></label>
-    <label><span data-payer-label>${currentKind === "refund" ? "收款人" : "付款人"}</span><select name="payer_id" required>${memberOptions(entry?.payer_id || state.listing.member_id)}</select></label></div>
+    <label><span data-payer-label>${currentKind === "refund" ? "收款人" : "付款人"}</span><select name="payer_id" required>${memberOptions(entry?.payer_id || state.trip.default_payer_id || state.listing.member_id)}</select></label></div>
     <div class="fields"><label>類別<select name="category">${state.config.categories.map((category) => `<option ${category === (entry?.category || "待分類") ? "selected" : ""}>${esc(category)}</option>`).join("")}</select></label>
     <label>分攤方式<select name="split_mode"><option value="equal">按權重</option><option value="exact" ${entry?.split_mode === "exact" ? "selected" : ""}>指定金額</option></select></label></div>
     <div class="share-box"><h3>分攤成員</h3>${choices.map((member) => { const share = shareById.get(member.id); return `
@@ -743,6 +749,7 @@ async function saveSettings(form) {
   const body = Object.fromEntries(new FormData(form));
   const notify = form.querySelector("[name=notify_web_changes]");
   if (notify) body.notify_web_changes = notify.checked;
+  body.default_payer_id = Number(body.default_payer_id || 0);
   body.start_date ||= null;
   body.end_date ||= null;
   body.default_currency = body.default_currency.toUpperCase();
@@ -788,9 +795,59 @@ function lineLogin() {
   window.liff.login({ redirectUri: redirect.href });
 }
 
+function inlineConfig() {
+  try { return JSON.parse($("#liff-config")?.textContent || "null"); } catch { return null; }
+}
+
+function tokenFresh(token) {
+  try {
+    const part = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    return JSON.parse(atob(part)).exp * 1000 > Date.now() + 60_000;
+  } catch { return false; }
+}
+
+// 回傳 false 表示已改顯示登入畫面。
+async function signIn({ reuse = true } = {}) {
+  const lineUser = window.liff.getDecodedIDToken()?.sub || "";
+  const saved = storage.get(TOKEN_KEY);
+  // 同一個 LINE 帳號、憑證還沒過期，就不必每次打開都請伺服器向 LINE 驗證。
+  if (reuse && lineUser && saved && storage.get(LINE_USER_KEY) === lineUser && tokenFresh(saved)) {
+    state.token = saved;
+    return true;
+  }
+  const idToken = window.liff.getIDToken();
+  if (!idToken) throw new Error("無法取得 LINE 登入身分，請重新開啟帳本。");
+  try {
+    state.token = (await api("/api/auth/line", { method: "POST", body: { id_token: idToken } })).token;
+  } catch (error) {
+    // 外部瀏覽器會沿用已過期的 ID token，要先登出才拿得到新的。LINE 內開啟時每次都會換新。
+    if (error.status !== 401 || window.liff.isInClient()) throw error;
+    window.liff.logout();
+    storage.remove(TOKEN_KEY);
+    setPage(heading("LINE 登入", "請重新登入", "LINE 登入已過期。") + button("使用 LINE 登入", "login", "primary"));
+    return false;
+  }
+  storage.set(TOKEN_KEY, state.token);
+  storage.set(LINE_USER_KEY, lineUser);
+  return true;
+}
+
+async function start(tripId, tab) {
+  // 帳本列表和帳本內容同時讀，不必一個等一個。帳本打不開時仍顯示列表。
+  const tripRequest = tripId ? call(`/api/trips/${tripId}`).catch((error) => error) : null;
+  state.listing = await call("/api/trips");
+  const trip = await tripRequest;
+  if (trip instanceof Error) {
+    if (trip.status === 401) throw trip;
+    render();
+    notice(trip.message);
+  } else if (trip) await openTrip(tripId, tab, trip);
+  else render();
+}
+
 async function boot() {
   try {
-    state.config = await api("/api/liff/config");
+    state.config = inlineConfig() || await api("/api/liff/config");
     if (!state.config.liff_id) {
       setPage(heading("LINE 登入", "帳本登入準備中", "請稍後從 LINE 重新開啟帳本。"));
       return;
@@ -802,20 +859,7 @@ async function boot() {
       setPage(heading("LINE 登入", "旅程帳本", "用 LINE 登入後即可查看帳本。") + button("使用 LINE 登入", "login", "primary"));
       return;
     }
-    const idToken = window.liff.getIDToken();
-    if (!idToken) throw new Error("無法取得 LINE 登入身分，請重新開啟帳本。");
-    try {
-      state.token = (await api("/api/auth/line", { method: "POST", body: { id_token: idToken } })).token;
-    } catch (error) {
-      // 外部瀏覽器會沿用已過期的 ID token，要先登出才拿得到新的。LINE 內開啟時每次都會換新。
-      if (error.status !== 401 || window.liff.isInClient()) throw error;
-      window.liff.logout();
-      storage.remove(TOKEN_KEY);
-      setPage(heading("LINE 登入", "請重新登入", "LINE 登入已過期。") + button("使用 LINE 登入", "login", "primary"));
-      return;
-    }
-    storage.set(TOKEN_KEY, state.token);
-    await loadList();
+    if (!await signIn()) return;
     const params = new URLSearchParams(location.search);
     let tripId = params.get("trip");
     // 從 LINE 打開時一律由 AI 記帳開始；重新整理會帶著網址上的分頁。
@@ -823,12 +867,19 @@ async function boot() {
     if (params.has("join")) {
       tab = null;
       try {
-        tripId = (await call("/api/trips/join", { method: "POST", body: { code: params.get("join") } })).trip_id;
-        await loadList();
+        tripId = String((await call("/api/trips/join", { method: "POST", body: { code: params.get("join") } })).trip_id);
         notice("已加入帳本");
       } finally { updateUrl((query) => query.delete("join")); }
     }
-    if (tripId && /^\d+$/.test(tripId)) await openTrip(tripId, tab);
+    if (!(tripId && /^\d+$/.test(tripId))) tripId = null;
+    try {
+      await start(tripId, tab);
+    } catch (error) {
+      // 沿用的憑證被拒時（例如伺服器換了簽章金鑰），重新向 LINE 驗證一次。
+      if (error.status !== 401) throw error;
+      if (!await signIn({ reuse: false })) return;
+      await start(tripId, tab);
+    }
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("/liff/sw.js").catch(() => {});
   } catch (error) { showError(error); }
 }

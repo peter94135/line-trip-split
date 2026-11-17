@@ -116,13 +116,15 @@ def _postback(label: str, data: str, fill: list[str]) -> dict:
     return action
 
 
+def _quick_reply(buttons: list[Button | tuple[str, str, str]]) -> dict:
+    return {"items": [{"type": "action", "action": _postback(label, data, fill)} for label, data, *fill in buttons[:13]]}
+
+
 def text_message(text: str, buttons: list[Button | tuple[str, str, str]] | None = None) -> dict:
     """按鈕為 Quick Reply，下一則訊息後就會消失。需要保留的按鈕請用 card_message()。"""
     message = {"type": "text", "text": _limit(text, 5000)}
     if buttons:
-        message["quickReply"] = {"items": [
-            {"type": "action", "action": _postback(label, data, fill)} for label, data, *fill in buttons[:13]
-        ]}
+        message["quickReply"] = _quick_reply(buttons)
     return message
 
 
@@ -130,7 +132,8 @@ def postback_button(label: str, data: str, *fill: str) -> dict:
     return {"type": "button", "style": "secondary", "height": "sm", "action": _postback(label, data, list(fill))}
 
 
-def card_message(text: str, buttons: list[Button | tuple[str, str, str]], *, columns: int = 2) -> dict:
+def card_message(text: str, buttons: list[Button | tuple[str, str, str]], *, columns: int = 2,
+                 quick: list[Button] | None = None) -> dict:
     """按鈕固定在訊息內的 Flex 卡片。Quick Reply 會在下一則訊息後消失，這裡的按鈕會保留。
 
     按鈕為 (標籤, postback data)，或 (標籤, data, 預填文字)：後者按下時打開鍵盤並帶入文字。
@@ -144,7 +147,11 @@ def card_message(text: str, buttons: list[Button | tuple[str, str, str]], *, col
     bubble = {"type": "bubble", "body": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": body}}
     if rows:
         bubble["footer"] = {"type": "box", "layout": "vertical", "spacing": "sm", "contents": rows}
-    return {"type": "flex", "altText": _limit(text, 1500), "contents": bubble}
+    message = {"type": "flex", "altText": _limit(text, 1500), "contents": bubble}
+    if quick:
+        # 卡片按鈕會保留；Quick Reply 只在最新訊息下方，給記完馬上要修正的人一鍵改。
+        message["quickReply"] = _quick_reply(quick)
+    return message
 
 
 def message_text(message: dict) -> str:

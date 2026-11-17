@@ -18,7 +18,9 @@ from sqlmodel import Session, select
 from app import auth, web_inputs as inputs
 from app.config import get_settings
 from app.models import Expense, ExpenseShare, GeminiCall, LineDelivery, LineInbox, Member, Transfer, Trip, TripMember, utcnow
-from app.services import admin_report, fx, gemini, line, line_delivery, line_edit, split, trip_stats, trips, web_ai
+from app.services import (
+    admin_report, fx, gemini, line, line_chat, line_delivery, line_edit, split, trip_stats, trips, web_ai,
+)
 from app.services.line_parse import CURRENCIES, CommandError, money
 
 router = APIRouter(prefix="/api")
@@ -121,6 +123,7 @@ def trip_detail(trip_id: RowId, session: auth.Database, member: MemberUser) -> d
         "can_manage": _organizer(trip, member), "has_records": _has_records(session, trip_id),
         "settlement_version": trip.ledger_version,
         "line_group": bool(trip.line_group_id), "notify_web_changes": trip.notify_web_changes,
+        "default_payer_id": trips.default_payer(trip, roster, 0) or None,
         "display_currencies": sorted({trip.settle_currency, *(row.currency for row in expenses),
                                       *(row.currency for row in transfers)}),
         "today": utcnow().astimezone(ZoneInfo(trip.timezone)).date(),
@@ -197,7 +200,8 @@ def _notify_group(session: Session, background: BackgroundTasks, trip: Trip, mes
 def _notify_expenses(session: Session, background: BackgroundTasks, trip: Trip, entries: list[Expense],
                      roster: dict, title: str) -> None:
     _notify_group(session, background, trip, (
-        line_edit.expense_card(session, trip, entry, roster, title, show_market_conversion=False) for entry in entries
+        line_edit.expense_card(session, trip, entry, roster, title, show_market_conversion=False,
+                              quick=False) for entry in entries
     ))
 
 
@@ -458,6 +462,8 @@ def delete_member(trip_id: RowId, member_id: RowId, session: auth.Database, memb
             detail += "可在編輯成員時取消「參與新支出的分攤」。"
         raise HTTPException(409, detail)
 
+    if trip.default_payer_id == member_id:
+        trip.default_payer_id = None
     session.delete(target)
     trips.audit(session, trip_id, member.id, "web", "刪除成員", f"成員 #{member_id}")
     session.commit()
@@ -471,22 +477,32 @@ def update_settings(trip_id: RowId, body: inputs.TripSettings, session: auth.Dat
     _require_organizer(trip, member)
     if trip.settle_currency != body.settle_currency and _has_records(session, trip_id):
         raise HTTPException(409, "已有支出或還款，為保留歷史換算結果，結算幣別已鎖定")
-    trip.sqlmodel_update(body.model_dump(exclude={"fixed_rates", "notify_web_changes"}))
+    trip.sqlmodel_update(body.model_dump(exclude={"fixed_rates", "notify_web_changes", "default_payer_id"}))
     if body.notify_web_changes is not None and body.notify_web_changes != trip.notify_web_changes:
         trip.notify_web_changes = body.notify_web_changes
         trips.audit(session, trip_id, member.id, "web", "開啟群組通知" if body.notify_web_changes else "關閉群組通知")
+    if body.default_payer_id is not None and (body.default_payer_id or None) != trip.default_payer_id:
+        # 0 表示記帳的人；沒帶欄位的舊版網頁不會改到這個設定。
+        roster = trips.people(session, trip_id)
+        if body.default_payer_id and (body.default_payer_id not in roster or not roster[body.default_payer_id][0].active):
+            raise HTTPException(422, "預設付款人必須是參與分攤的帳本成員")
+        trip.default_payer_id = body.default_payer_id or None
+        label = trips.name_of(roster, trip.default_payer_id) if trip.default_payer_id else "記帳的人"
+        trips.audit(session, trip_id, member.id, "web", "設定預設付款人", label)
     trip.fixed_rates = {key: float(value) for key, value in body.fixed_rates.items()}
     session.commit()
 
 
 @router.post("/trips/{trip_id}/close", status_code=204)
-def close_trip(trip_id: RowId, session: auth.Database, member: MemberUser) -> None:
+def close_trip(trip_id: RowId, session: auth.Database, member: MemberUser, background: BackgroundTasks) -> None:
     _begin(session)
     trip = _trip(session, trip_id, member)
     _require_organizer(trip, member)
     if trip.status != "closed":
         trips.audit(session, trip_id, member.id, "web", "結束帳本")
-    trip.status = "closed"
+        trip.status = "closed"
+        # 和 LINE「結束帳本」一樣把結算結果送到群組；重複按結束不會再推播。
+        _notify_group(session, background, trip, line_chat.closing_summary(session, trip, member.id))
     session.commit()
 
 

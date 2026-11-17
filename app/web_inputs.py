@@ -118,6 +118,7 @@ class TripSettings(BaseModel):
     settle_currency: Currency
     fixed_rates: dict[Currency, Rate] = Field(default_factory=dict, max_length=100)
     notify_web_changes: bool | None = None
+    default_payer_id: int | None = Field(default=None, ge=0)  # 0：記帳的人
 
     @model_validator(mode="after")
     def dates_and_timezone(self):

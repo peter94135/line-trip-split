@@ -1,10 +1,11 @@
+import json
 import logging
 from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import BASE_DIR, get_settings
@@ -62,6 +63,9 @@ async def cache_policy(request: Request, call_next):
     if request.url.path.startswith("/api/") or request.url.path in ("/liff/", "/admin", "/liff/sw.js"):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "no-referrer"
+    elif request.url.path.startswith("/assets/") and "v" in request.query_params and response.status_code == 200:
+        # 網址帶版本號的檔案內容不會變，LINE 內建瀏覽器重開時不必再下載或確認。
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     return response
 
 
@@ -78,8 +82,11 @@ def home() -> RedirectResponse:
 
 
 @app.get("/liff/", include_in_schema=False)
-def liff_page() -> FileResponse:
-    return FileResponse(WEB_DIR / "index.html")
+def liff_page() -> HTMLResponse:
+    # 設定直接放進頁面，打開時少等一次 /api/liff/config。
+    config = json.dumps(web.liff_config(), ensure_ascii=False).replace("<", "\\u003c")
+    page = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+    return HTMLResponse(page.replace("</head>", f'<script id="liff-config" type="application/json">{config}</script>\n</head>', 1))
 
 
 @app.get("/liff/sw.js", include_in_schema=False)

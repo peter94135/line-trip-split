@@ -53,7 +53,8 @@ def verify_line_id(id_token: str) -> tuple[str, str | None]:
 
 def issue_token(subject: str, role: str) -> str:
     now = utcnow()
-    expiry = now + timedelta(hours=1 if role == "admin" else 12)
+    # 成員憑證只代表 LINE 身分，每次請求仍會重新檢查帳本權限。
+    expiry = now + (timedelta(hours=1) if role == "admin" else timedelta(days=7))
     return jwt.encode({"iss": ISSUER, "aud": role, "sub": subject, "iat": now, "exp": expiry},
                       get_settings().signing_secret, algorithm="HS256")
 

@@ -99,7 +99,8 @@ def prepare(drafts: list[Draft], trip: Trip, today: date, roster: dict, speaker:
         def resolve(name: str) -> int:
             return trips.resolve(roster, speaker, name, mentions)
 
-        payer_id = resolve(draft.payer) if draft.payer else speaker
+        # 「我請客」一定是記帳的人付；其他沒講付款人的照帳本的預設付款人。
+        payer_id = resolve(draft.payer) if draft.payer else speaker if draft.treat else trips.default_payer(trip, roster, speaker)
         include = [resolve(name) for name in draft.include] if draft.include else None
         exclude = [resolve(name) for name in draft.exclude]
         if draft.include and any(name in mentions for name in draft.include) and speaker not in exclude:

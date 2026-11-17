@@ -18,12 +18,14 @@ from app.services.line_parse import CommandError, normalize
 log = logging.getLogger(__name__)
 KEYWORDS = {
     "伴手禮": "伴手禮 紀念品 送禮 名產 手信",
-    "餐飲": "早餐 午餐 晚餐 宵夜 便當 飲料 咖啡 拉麵 火鍋 燒肉 壽司 餐廳 居酒屋 酒 啤酒 美食 小吃 食堂",
-    "交通": "高鐵 台鐵 火車 捷運 公車 客運 計程車 uber 停車 機票 地鐵 新幹線 租車 suica 車票",
-    "住宿": "飯店 旅館 民宿 住宿 airbnb agoda booking hotel",
-    "門票娛樂": "電影 門票 演唱會 遊樂園 環球影城 迪士尼 展覽 溫泉",
+    "餐飲": "早餐 午餐 晚餐 宵夜 早午餐 便當 飲料 咖啡 拉麵 火鍋 燒肉 壽司 餐廳 居酒屋 酒 啤酒 美食 小吃 食堂 "
+             "奶茶 手搖 甜點 蛋糕 麵包 豆花 冰品 肉圓 牛肉麵 麵店 自助餐 麥當勞 肯德基 星巴克 摩斯",
+    "交通": "高鐵 台鐵 火車 捷運 公車 客運 計程車 uber 停車 機票 地鐵 新幹線 租車 suica 車票 "
+             "加油 油錢 汽油 過路費 etag 通行費 渡輪 船票 機車",
+    "住宿": "飯店 旅館 民宿 住宿 airbnb agoda booking hotel 露營 營地",
+    "門票娛樂": "電影 門票 演唱會 遊樂園 環球影城 迪士尼 展覽 溫泉 纜車 遊船 體驗 樂園 博物館",
     "購物": "衣服 鞋子 包包 uniqlo 百貨 藥妝 超商 全家 7-11 lawson 全聯",
-    "雜支": "行李寄放 小費 網卡 esim 手續費",
+    "雜支": "行李寄放 小費 網卡 esim 手續費 洗衣 保險 雨傘",
 }
 CATEGORIES = ("餐飲", "交通", "住宿", "門票娛樂", "購物", "伴手禮", "雜支", "待分類")
 
@@ -68,6 +70,12 @@ def people(session: Session, trip_id: int) -> dict[int, tuple[TripMember, Member
 def name_of(people: dict, member_id: int) -> str:
     membership, member = people[member_id]
     return membership.nickname or member.line_name or f"成員 {member_id}"
+
+
+def default_payer(trip: Trip, people: dict, speaker: int) -> int:
+    """帳本設定的預設付款人仍是啟用中的成員時用他，否則是記帳的人。"""
+    entry = people.get(trip.default_payer_id) if trip.default_payer_id else None
+    return trip.default_payer_id if entry and entry[0].active else speaker
 
 
 def resolve(people: dict, speaker: int, name: str, mentions: dict[str, int]) -> int:

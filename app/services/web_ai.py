@@ -59,7 +59,8 @@ def _drafts(session: Session, trip: Trip, member: Member, text: str | None,
     result = []
     for entry in entries:
         exact = any(share.amount is not None for share in entry.shares)
-        category, _ = trips.resolve_category(session, entry.item, entry.merchant, entry.category)
+        suggested = entry.category or (gemini.guess_category(session, entry.item, entry.merchant) if source == "web" else None)
+        category, _ = trips.resolve_category(session, entry.item, entry.merchant, suggested)
         result.append(dict(
             item=entry.item, kind=entry.kind, merchant=entry.merchant, spent_on=entry.spent_on, amount=entry.amount,
             currency=entry.currency, payer_id=entry.payer_id, category=category, split_mode="exact" if exact else "equal",

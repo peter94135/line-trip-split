@@ -1,6 +1,7 @@
 """LINE 指令分派。所有帳本變更由收件匣在同一筆交易中提交。"""
 
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from urllib.parse import parse_qs, quote
@@ -23,6 +24,7 @@ HELP = (
     "記帳：記 晚餐 3000\n"
     "收據：先傳「記」再傳照片，或先傳照片再說「記 這張」。\n"
     "指定付款與分攤：記 小明付 計程車 800 我和小華\n"
+    "固定由某人付：預設付款人 小明（取消：預設付款人 取消）\n"
     "還款：已還 小明 1200｜公費：交公費 小明 5000\n"
     "退款：記 押金退回 5000 小明收\n"
     "查詢：帳本、成員、明細、結算、我欠多少、統計、我的統計\n"
@@ -58,9 +60,20 @@ def _member(session: Session, user_id: str) -> Member | None:
     return session.exec(select(Member).where(Member.line_user_id == user_id)).first()
 
 
+PROFILE_TTL = timedelta(hours=6)
+_profile_cache: dict[tuple[str | None, str], tuple[datetime, str | None]] = {}
+
+
 def _profile_name(user_id: str, group_id: str | None) -> str | None:
+    # 每則群組指令都要確認發話者，LINE 名稱很少改，短時間內沿用上次查到的結果，少等一次 LINE API。
+    key, now = (group_id, user_id), utcnow()
+    if (cached := _profile_cache.get(key)) and now - cached[0] < PROFILE_TTL:
+        return cached[1]
     name = line.get_profile(user_id, group_id).get("displayName")
-    return name if isinstance(name, str) and name.strip() else None
+    name = name if isinstance(name, str) and name.strip() else None
+    if name:  # 查不到時不快取，下次再試。
+        _profile_cache[key] = (now, name)
+    return name
 
 
 def _event_time(event: dict) -> datetime:
@@ -184,6 +197,13 @@ def _settle(session: Session, trip: Trip, speaker: int, *, personal: bool = Fals
     return reply("\n".join(lines) + link)
 
 
+def closing_summary(session: Session, trip: Trip, actor_id: int) -> list[dict]:
+    """網頁結束帳本時推播到群組，內容與 LINE「結束帳本」的回覆相同。"""
+    [message] = _settle(session, trip, actor_id, closing=True)
+    message["text"] = f"{trips.name_of(trips.people(session, trip.id), actor_id)} 在網頁結束帳本\n{message['text']}"
+    return [message]
+
+
 def _statistics(session: Session, trip: Trip, speaker: int, *, personal: bool) -> list[dict]:
     stats = trip_stats.calculate(session, trip)
     currency = stats["currency"]
@@ -285,6 +305,9 @@ def _record(session: Session, trip: Trip, group_id: str | None, user_id: str, ke
     currency = draft.currency or trip.default_currency
     settle_currency = trip.settle_currency
     quotes = [trips.quote_amount(trip, draft.amount, currency)]
+    # 和查匯率一樣在寫入前呼叫，等 Gemini 時不佔資料庫寫入鎖。
+    if draft.category is None and (guessed := gemini.guess_category(session, draft.item, draft.merchant)):
+        drafts = [replace(draft, category=guessed)]
     speaker, mentions = _enroll(session, trip, user_id, group_id, incoming.mentions)
     _require_open(session, trip, settle_currency)
     roster = trips.people(session, trip.id)
@@ -401,6 +424,32 @@ def _require_open(session: Session, trip: Trip, settle_currency: str | None = No
         raise CommandError("帳本的結算幣別剛變更，請重新送出指令。")
 
 
+def _default_payer(session: Session, trip: Trip, actor: Member | None, group_id: str | None, user_id: str,
+                   incoming: IncomingText) -> list[dict]:
+    name = incoming.text.removeprefix("預設付款人").strip()
+    if not name:
+        roster = trips.people(session, trip.id)
+        if trip.default_payer_id in roster:
+            return reply(f"預設付款人：{trips.name_of(roster, trip.default_payer_id)}。沒指定付款人的帳都記在他身上。")
+        return reply("預設付款人：記帳的人。傳「預設付款人 小明」可改成沒指定時都記小明付。")
+    # 先確認權限，避免非成員只因嘗試設定就加入帳本。
+    if (not actor or trip.created_by != actor.id) and get_settings().line_admin_user_id != user_id:
+        raise CommandError("請由帳本建立者或管理員設定預設付款人。")
+    speaker, mentions = _enroll(session, trip, user_id, group_id, incoming.mentions)
+    _require_open(session, trip)
+    roster = trips.people(session, trip.id)
+    if name in ("取消", "記帳的人", "無"):
+        trip.default_payer_id, label = None, "記帳的人"
+    else:
+        member_id = trips.resolve(roster, speaker, name, mentions)
+        if not roster[member_id][0].active:
+            raise CommandError("這位成員已停用分攤，不能設為預設付款人。")
+        trip.default_payer_id, label = member_id, trips.name_of(roster, member_id)
+    trips.audit(session, trip.id, speaker, "line", "設定預設付款人", label)
+    tail = "" if trip.default_payer_id is None else "要記成自己付時傳「記 我付 晚餐 300」。"
+    return reply(f"預設付款人改為{label}。{tail}")
+
+
 def _details(session: Session, trip: Trip) -> list[dict]:
     roster = trips.people(session, trip.id)
     rows = session.exec(select(Expense).where(Expense.trip_id == trip.id, Expense.deleted_at.is_(None))
@@ -417,7 +466,9 @@ def _details(session: Session, trip: Trip) -> list[dict]:
 def _read_command(session: Session, trip: Trip, speaker: int, user_id: str, text: str) -> list[dict]:
     if text == "帳本":
         link = _group_invite(trip) if trip.line_group_id and trip.status == "open" else ""
-        return reply(f"{_trip_header(trip)}\n記帳幣別 {trip.default_currency}｜結算幣別 {trip.settle_currency}"
+        roster = trips.people(session, trip.id)
+        payer = f"\n預設付款人 {trips.name_of(roster, trip.default_payer_id)}" if trip.default_payer_id in roster else ""
+        return reply(f"{_trip_header(trip)}\n記帳幣別 {trip.default_currency}｜結算幣別 {trip.settle_currency}{payer}"
                      + (link or _trip_link(trip)))
     if text in ("加入", "成員"):
         roster = trips.people(session, trip.id)
@@ -565,6 +616,8 @@ def handle(session: Session, event: dict) -> list[dict]:
         return _read_command(session, trip, speaker, user_id, text)
     if text in ("已還", "交公費") or text.startswith(("已還 ", "交公費 ")):
         return _repay(session, trip, group_id, user_id, incoming)
+    if text == "預設付款人" or text.startswith("預設付款人 "):
+        return _default_payer(session, trip, actor, group_id, user_id, incoming)
     if RECORD.match(text) or (text and (not group_id or incoming.addressed)):
         photo = _photo_request(session, trip, group_id, user_id, key, incoming, when)
         if photo is not None:

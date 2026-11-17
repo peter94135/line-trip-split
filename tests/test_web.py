@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import time
 
 import httpx
@@ -57,7 +58,7 @@ def web(db_engine, monkeypatch):
 def test_liff_login_invitation_and_membership_isolation(web):
     client, login, (trip, _, _) = web
     assert client.get("/liff/").status_code == 200
-    assert client.get("/assets/liff.js?v=15").status_code == 200
+    assert client.get("/assets/liff.js?v=17").status_code == 200
     assert client.get("/api/liff/config").json()["liff_id"] == "test-liff"
     assert client.post("/api/auth/line", json={"id_token": "invalid"}).status_code == 401
     assert client.post("/api/auth/line", json={"id_token": "wrong-audience"}).status_code == 401
@@ -73,6 +74,29 @@ def test_liff_login_invitation_and_membership_isolation(web):
     visible = client.get(f"/api/trips/{trip}", headers=carol).json()
     assert len(visible["members"]) == 3
     assert "line_user_id" not in str(visible) and "line_group_id" not in visible
+
+
+def test_closing_trip_on_web_pushes_settlement_to_group_once(web, monkeypatch):
+    client, login, (trip_id, alice_id, bob_id) = web
+    alice = login("Alice")
+    base = f"/api/trips/{trip_id}"
+    pushes = []
+    monkeypatch.setattr(line, "is_configured", lambda: True)
+    monkeypatch.setattr(line, "_request", lambda method, path, payload, *, retry_key=None: pushes.append(payload) or {})
+    expense = dict(item="晚餐", spent_on="2026-11-10", amount="100", currency="TWD", category="餐飲",
+                   payer_id=alice_id, split_mode="equal",
+                   shares=[{"member_id": alice_id, "weight": "1"}, {"member_id": bob_id, "weight": "1"}])
+    assert client.post(base + "/expenses", headers=alice, json=expense).status_code == 201
+    pushes.clear()
+
+    assert client.post(base + "/close", headers=alice).status_code == 204
+    assert len(pushes) == 1 and pushes[0]["to"] == "C-test"
+    [message] = pushes[0]["messages"]
+    assert message["type"] == "text"
+    assert message["text"].startswith("Alice 在網頁結束帳本\n京都｜已結束｜共 $100")
+    assert "Bob → Alice　$50" in message["text"] and "tab=stats" in message["text"]
+    assert client.post(base + "/close", headers=alice).status_code == 204
+    assert len(pushes) == 1
 
 
 def test_web_record_changes_send_line_cards_to_bound_group_after_commit(web, db_engine, monkeypatch):
@@ -495,3 +519,46 @@ def test_web_ai_drafts_confirm_in_one_batch(web, db_engine, monkeypatch):
     assert len(client.get(path, headers=alice).json()["expenses"]) == 2
     with Session(db_engine) as session:
         assert {row.source for row in session.exec(select(Expense))} == {"web"}
+
+
+def test_liff_page_inlines_config_and_versioned_assets_are_immutable(web):
+    client, _, _ = web
+    page = client.get("/liff/")
+    assert page.headers["cache-control"] == "no-store"
+    config = page.text.split('<script id="liff-config" type="application/json">', 1)[1].split("</script>", 1)[0]
+    assert json.loads(config) == client.get("/api/liff/config").json()
+    assert "immutable" in client.get("/assets/liff.js?v=17").headers["cache-control"]
+    assert "immutable" not in client.get("/assets/liff.js").headers.get("cache-control", "")
+
+
+def test_group_profile_names_are_cached_briefly(monkeypatch):
+    from app.services import line_chat
+    calls = []
+    monkeypatch.setattr(line, "get_profile", lambda user, group: calls.append(user) or {"displayName": "Alice"})
+    assert line_chat._profile_name("U-Alice", "C-1") == "Alice"
+    assert line_chat._profile_name("U-Alice", "C-1") == "Alice"
+    assert calls == ["U-Alice"]
+    line_chat._profile_cache[("C-1", "U-Alice")] = (line_chat.utcnow() - line_chat.PROFILE_TTL, "Alice")
+    assert line_chat._profile_name("U-Alice", "C-1") == "Alice" and len(calls) == 2
+
+
+def test_default_payer_setting_applies_to_ai_drafts(web, db_engine):
+    client, login, (trip_id, alice_id, bob_id) = web
+    alice, bob = login("Alice"), login("Bob")
+    base = f"/api/trips/{trip_id}"
+    settings = {"name": "京都", "timezone": "Asia/Taipei", "default_currency": "TWD", "settle_currency": "TWD",
+                "fixed_rates": {"JPY": "0.2"}}
+    assert client.get(base, headers=alice).json()["default_payer_id"] is None
+    assert client.put(base + "/settings", headers=bob, json={**settings, "default_payer_id": bob_id}).status_code == 403
+    assert client.put(base + "/settings", headers=alice, json={**settings, "default_payer_id": 999}).status_code == 422
+    assert client.put(base + "/settings", headers=alice, json={**settings, "default_payer_id": bob_id}).status_code == 204
+    assert client.get(base, headers=alice).json()["default_payer_id"] == bob_id
+    draft = client.post(base + "/ai/parse", headers=alice, json={"text": "晚餐 300"}).json()["expenses"][0]
+    assert draft["payer_id"] == bob_id
+    mine = client.post(base + "/ai/parse", headers=alice, json={"text": "我付 晚餐 300"}).json()["expenses"][0]
+    assert mine["payer_id"] == alice_id
+    # 舊版網頁沒帶欄位時不改設定；0 改回記帳的人。
+    assert client.put(base + "/settings", headers=alice, json=settings).status_code == 204
+    assert client.get(base, headers=alice).json()["default_payer_id"] == bob_id
+    assert client.put(base + "/settings", headers=alice, json={**settings, "default_payer_id": 0}).status_code == 204
+    assert client.get(base, headers=alice).json()["default_payer_id"] is None

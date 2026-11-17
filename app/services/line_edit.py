@@ -22,8 +22,20 @@ def _reply(text: str, buttons: list[line.Button] | None = None) -> list[dict]:
     return [line.text_message(text, buttons)]
 
 
+def quick_fixes(entry: Expense, roster: dict) -> list[line.Button]:
+    """記完最常改的是付款人和沒對到的類別，直接列成一鍵按鈕，不必先開選單。"""
+    verb = "收" if entry.kind == "refund" else "付"
+    buttons = [_button(f"{trips.name_of(roster, member_id)}{verb}", "setpayer", entry.id, who=member_id)
+               for member_id, (membership, _) in roster.items()
+               if membership.active and member_id != entry.payer_id][:6]
+    if entry.category_source in ("none", "gemini"):
+        buttons += [_button(name, "setcat", entry.id, category=index) for index, name in enumerate(trips.CATEGORIES)
+                    if name not in (entry.category, "待分類")]
+    return buttons[:13]
+
+
 def expense_card(session: Session, trip: Trip, entry: Expense, roster: dict, title: str,
-                 *, show_market_conversion: bool = True) -> dict:
+                 *, show_market_conversion: bool = True, quick: bool = True) -> dict:
     """支出的最新狀態，附固定的編輯按鈕。記帳與每次修改後都回這張卡片。"""
     amount = money(entry.amount, entry.currency)
     attribution = ""
@@ -49,6 +61,7 @@ def expense_card(session: Session, trip: Trip, entry: Expense, roster: dict, tit
     return line.card_message(
         f"{title}：{kind_label}{entry.item} {amount}｜{entry.category}\n{trips.name_of(roster, entry.payer_id)}{verb}｜"
         f"分給 {len(shares)} 人：{'、'.join(names)}{attribution}", buttons,
+        quick=quick_fixes(entry, roster) if quick else None,
     )
 
 
