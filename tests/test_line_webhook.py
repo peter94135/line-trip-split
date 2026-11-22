@@ -110,7 +110,7 @@ def test_group_open_reply_invites_liff_user_into_the_same_trip(bot, db_engine, m
 def test_quick_record_classifies_food_merchant_name(bot):
     _, _, send, _ = bot
     send("開帳本 台南")
-    assert "阿信美食 $500｜餐飲" in send("記 阿信美食 500")[0]["text"]
+    assert "阿信美食 TWD 500｜餐飲" in send("記 阿信美食 500")[0]["text"]
 
 
 def test_signed_group_commands_and_isolation(bot, db_engine):
@@ -131,10 +131,10 @@ def test_signed_group_commands_and_isolation(bot, db_engine):
 
     assert "加入" in send("加入", user="U-ming")[0]["text"]
     assert "小明" in send("成員")[0]["text"]
-    assert "¥3,000" in send("記 晚餐 3000", key="dinner")[0]["text"]
+    assert "JPY 3,000" in send("記 晚餐 3000", key="dinner")[0]["text"]
     assert send("記 晚餐 3000", key="dinner") == []
-    assert "¥4,500" in send("記 ¥4500 拉麵")[0]["text"]
-    assert "¥4,500" in send("記 拉麵 4500 日幣")[0]["text"]
+    assert "JPY 4,500" in send("記 ¥4500 拉麵")[0]["text"]
+    assert "JPY 4,500" in send("記 拉麵 4500 日幣")[0]["text"]
     assert "｜交通\n" in (taxi := send("記 計程車 800 我和小明")[0]["text"]) and "分給 2 人" in taxi
     assert "小明付" in send("記 小明付 門票 2400")[0]["text"]
     assert "已加入" in send("加入", user="U-hua")[0]["text"]
@@ -152,7 +152,7 @@ def test_signed_group_commands_and_isolation(bot, db_engine):
     assert "找不到" in send("記 晚餐 100 我和阿明")[0]["text"]
     assert "合計必須等於" in send("記 晚餐 2000 小明 1200、小華 700")[0]["text"]
     assert "明細" not in send("明細", group="C-other")[0]["text"]
-    assert "¥3,000" in send("明細")[0]["text"]
+    assert "JPY 3,000" in send("明細")[0]["text"]
     assert "文字記帳" in send("記")[0]["text"]
     assert "私訊" in send("我的ID")[0]["text"]
     assert "U-me" in send("我的ID", group=None)[0]["text"]
@@ -169,13 +169,14 @@ def test_statistics_commands_only_show_member_data(bot, monkeypatch):
     send("加入", user="U-ming")
     send("記 晚餐 1001")
     assert "請先傳「加入」" in send("統計", user="U-new")[0]["text"]
-    assert "餐飲　$1,001" in send("統計")[0]["text"]
+    assert "餐飲　TWD 1,001" in send("統計")[0]["text"]
     own = send("我的統計", user="U-ming")[0]["text"]
-    assert "我的分擔 $501" in own and "$1,001" not in own
+    assert "我的分擔 TWD 501" in own and "TWD 1,001" not in own
     assert "結算明細：https://liff.line.me/test-liff" in send("我欠多少", user="U-ming")[0]["text"]
     closed = send("結束帳本")
-    assert len(closed) == 1 and "統計：https://liff.line.me/test-liff" in closed[0]["text"]
-    assert "餐飲　$1,001" in send("統計")[0]["text"]
+    assert len(closed) == 1 and closed[0]["type"] == "flex"
+    assert closed[0]["contents"]["footer"]["contents"][-1]["action"]["uri"].endswith("&tab=stats")
+    assert "餐飲　TWD 1,001" in send("統計")[0]["text"]
 
 
 def test_settlement_postback_permissions_version_and_redelivery(bot, db_engine):
@@ -185,8 +186,8 @@ def test_settlement_postback_permissions_version_and_redelivery(bot, db_engine):
     send("加入", user="U-hua")
     send("記 晚餐 1500")
 
-    def actions():
-        message = send("結算")[0]
+    def actions(command="結算"):
+        message = send(command)[0]
         assert message["type"] == "flex"
         return {item["action"]["label"]: item["action"]["data"]
                 for box in message["contents"]["body"]["contents"] if box["type"] == "box"
@@ -197,9 +198,8 @@ def test_settlement_postback_permissions_version_and_redelivery(bot, db_engine):
     assert "只有付款人" in send(postback=original["我已付"], user="U-hua")[0]["text"]
     assert "只有收款人" in send(postback=original["已收到"], user="U-ming")[0]["text"]
     assert "已更新" in send(postback=original["我已付"], user="U-ming", group="C-other")[0]["text"]
-    send("結束帳本")
+    current = actions("結束帳本")
     assert "已更新" in send(postback=original["我已付"], user="U-ming")[0]["text"]
-    current = actions()
     result = send(postback=current["已收到"], user="U-me", key="settle-retry")
     assert result[0]["type"] == "flex" and "小明 → 阿傑" not in result[0]["text"]
     assert send(postback=current["已收到"], user="U-me", key="settle-retry") == []
@@ -214,9 +214,9 @@ def test_line_refund_examples_and_gemini_confirmation(bot, db_engine, monkeypatc
     send("開帳本 京都")
     send("加入", user="U-ming")
     tax = send("記 退稅 3000")[0]["text"]
-    assert "退款｜退稅 $3,000" in tax and "阿傑收" in tax
+    assert "退款｜退稅 TWD 3,000" in tax and "阿傑收" in tax
     deposit = send("記 押金退回 5000 小明收")[0]["text"]
-    assert "退款｜押金退回 $5,000" in deposit and "小明收" in deposit
+    assert "退款｜押金退回 TWD 5,000" in deposit and "小明收" in deposit
 
     monkeypatch.setenv("GEMINI_API_KEY", "fake")
     get_settings.cache_clear()
@@ -227,7 +227,7 @@ def test_line_refund_examples_and_gemini_confirmation(bot, db_engine, monkeypatc
         ],
     }))
     draft = send("記 住宿退款 800、早餐 200")[0]
-    assert "退款｜住宿退款 $800" in draft["text"] and "小明收" in draft["text"]
+    assert "退款｜住宿退款 TWD 800" in draft["text"] and "小明收" in draft["text"]
     send(postback=buttons(draft)["好"])
     with Session(db_engine) as session:
         rows = session.exec(select(Expense).order_by(Expense.id)).all()
@@ -241,7 +241,7 @@ def test_public_fund_uses_transfers_and_returns_surplus(bot, db_engine):
     send("開帳本 公費")
     for user in ("U-ming", "U-hua", "U-new"):
         send("加入", user=user)
-        assert "你交給阿傑公費 $5,000" in send("交公費 阿傑 5000", user=user)[0]["text"]
+        assert "你交給阿傑公費 TWD 5,000" in send("交公費 阿傑 5000", user=user)[0]["text"]
     send("記 住宿 12000")
     with Session(db_engine) as session:
         trip = session.exec(select(Trip)).one()
@@ -258,8 +258,8 @@ def test_repayments_edits_closed_trip_and_private_selection(bot, db_engine):
     send("開帳本 京都")
     send("加入", user="U-ming")
     saved = send("記 晚餐 1000")[0]
-    assert "小明 → 阿傑　$500" in send("結算")[0]["text"]
-    assert "我 → 阿傑　$500" in send("我欠多少", user="U-ming")[0]["text"]
+    assert "小明 → 阿傑　TWD 500" in send("結算")[0]["text"]
+    assert "我 → 阿傑　TWD 500" in send("我欠多少", user="U-ming")[0]["text"]
     assert "已記還款" in send("已還 阿傑 500", user="U-ming")[0]["text"]
     assert "大家都結清了" in send("結算")[0]["text"]
 
@@ -271,22 +271,22 @@ def test_repayments_edits_closed_trip_and_private_selection(bot, db_engine):
     split_picker = send(postback=buttons(split_picker)["✓ 小明"], user="U-ming")[0]
     updated = send(postback=buttons(split_picker)["完成"], user="U-ming")[0]
     # 修改後回覆最新內容，並保留編輯按鈕。
-    assert updated["text"] == "已改分攤：晚餐 $1,000｜餐飲\n阿傑付｜分給 1 人：阿傑" and "改分攤" in buttons(updated)
+    assert updated["text"] == "已改分攤：晚餐 TWD 1,000｜餐飲\n阿傑付｜分給 1 人：阿傑" and "改分攤" in buttons(updated)
     assert "已失效" in send(postback=stale_done, user="U-ming")[0]["text"]
     payer = send(postback=controls["改付款人"])[0]
-    assert "已改付款人：晚餐 $1,000｜餐飲\n小明付｜分給 1 人：阿傑" == send(postback=buttons(payer)["小明"])[0]["text"]
+    assert "已改付款人：晚餐 TWD 1,000｜餐飲\n小明付｜分給 1 人：阿傑" == send(postback=buttons(payer)["小明"])[0]["text"]
     category = send(postback=controls["改類別"])[0]
-    assert send(postback=buttons(category)["雜支"])[0]["text"].startswith("已改類別：晚餐 $1,000｜雜支\n")
+    assert send(postback=buttons(category)["雜支"])[0]["text"].startswith("已改類別：晚餐 TWD 1,000｜雜支\n")
     # 刪除要再確認一次，回覆與資料都記下操作者。
     confirm = send(postback=controls["刪除"])[0]
-    assert confirm["text"] == "確定刪除「晚餐 $1,000」？" and list(buttons(confirm)) == ["確定刪除", "取消"]
+    assert confirm["text"] == "確定刪除「晚餐 TWD 1,000」？" and list(buttons(confirm)) == ["確定刪除", "取消"]
     assert "沒有支出" not in send("明細")[0]["text"]
-    assert send(postback=buttons(confirm)["取消"])[0]["text"].startswith("未刪除：晚餐 $1,000")
+    assert send(postback=buttons(confirm)["取消"])[0]["text"].startswith("未刪除：晚餐 TWD 1,000")
     deleted = send(postback=buttons(confirm)["確定刪除"], user="U-ming")[0]
     assert deleted["text"] == "小明 已刪除「晚餐」。" and list(buttons(deleted)) == ["復原"]
     assert "沒有支出" in send("明細")[0]["text"]
     assert send(postback=controls["刪除"])[0]["text"] == "「晚餐」已由小明刪除。"
-    assert send(postback=buttons(deleted)["復原"])[0]["text"].startswith("阿傑 已復原：晚餐 $1,000｜雜支\n小明付")
+    assert send(postback=buttons(deleted)["復原"])[0]["text"].startswith("阿傑 已復原：晚餐 TWD 1,000｜雜支\n小明付")
 
     assert "建立者" in send("結束帳本", user="U-ming")[0]["text"]
     assert "已結束" in send("結束帳本")[0]["text"]
@@ -354,7 +354,7 @@ def test_complex_expense_requires_its_owners_confirmation(bot, db_engine, monkey
     assert "已記" in send("記 早餐 100", when=when)[0]["text"]
     assert calls == []
     first = send("記 昨天晚餐小明付了 6400 日幣，阿傑沒去", when=when)[0]
-    assert "2026-11-10 晚餐 ¥6,400" in first["text"] and "小明付｜分攤：小明、小華" in first["text"]
+    assert "2026-11-10 晚餐 JPY 6,400" in first["text"] and "小明付｜分攤：小明、小華" in first["text"]
     assert calls[0][1]["today"].isoformat() == "2026-11-11"
     assert {member["line_name"] for member in calls[0][1]["members"]} == {"阿傑", "小明", "小華"}
     assert send("好", user="U-ming") == []
@@ -362,7 +362,7 @@ def test_complex_expense_requires_its_owners_confirmation(bot, db_engine, monkey
     with Session(db_engine) as session:
         assert session.exec(select(Expense)).one().item == "早餐"
     second = send("改成 6200 日幣", when=when)[0]
-    assert "¥6,200" in second["text"]
+    assert "JPY 6,200" in second["text"]
     assert calls[-1][1]["previous"][0]["amount"] == "6400.0"
     assert "失效" in send(postback=buttons(first)["好"])[0]["text"]
     assert "已記" in send("好")[0]["text"]
@@ -428,7 +428,7 @@ def test_photo_windows_only_download_requested_own_images(bot, db_engine, monkey
     assert "2 分鐘" in send("記 這張", user="U-ming", when=when + timedelta(minutes=10))[0]["text"]
     assert downloads == []
     first = send("記 這張", when=when + timedelta(minutes=10))[0]
-    assert "待確認" in first["text"] and "¥2,180 (JPY)｜餐飲" in first["text"]
+    assert "待確認" in first["text"] and "JPY 2,180｜餐飲" in first["text"]
     assert downloads == ["too-late"]
     with Session(db_engine) as session:
         assert not session.exec(select(Expense)).all()
@@ -529,3 +529,16 @@ def test_unknown_names_use_gemini_category_guess(bot, db_engine, monkeypatch):
     assert "｜交通" in send("記 加油 500")[0]["altText"] and asked == ["喝喝茶"]
     with Session(db_engine) as session:
         assert session.exec(select(Expense).where(Expense.item == "喝喝茶")).one().category_source == "gemini"
+
+
+def test_group_count_warning_tracks_enrollment(bot, monkeypatch):
+    _, _, send, _ = bot
+    monkeypatch.setattr(line, "group_count", lambda group: 2)
+    assert "群組有 2 人，帳本有 1 人" in send("開帳本 台南")[0]["text"]
+    # 記帳不提醒，只回記帳卡片。
+    [card] = send("記 早餐 100")
+    assert card["type"] == "flex"
+    warning, members = send("成員")
+    assert "加入" in warning["text"] and "成員" in members["text"]
+    assert len(send("加入", user="U-ming")) == 1
+    assert len(send("成員")) == 1

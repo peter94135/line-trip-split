@@ -146,7 +146,7 @@ def card(session: Session, chat: LineChat, pending: Pending, trip: Trip, roster:
             shares.append(name)
         category, _ = trips.resolve_category(session, entry.item, entry.merchant, entry.category)
         kind_label, verb = ("退款｜", "收") if entry.kind == "refund" else ("", "付")
-        lines.append(f"{entry.spent_on.isoformat()} {kind_label}{entry.item} {money(entry.amount, entry.currency)} ({entry.currency})｜{category}")
+        lines.append(f"{entry.spent_on.isoformat()} {kind_label}{entry.item} {money(entry.amount, entry.currency)}｜{category}")
         lines.append(f"{trips.name_of(roster, entry.payer_id)}{verb}｜分攤：{'、'.join(shares)}")
     # 「改成」只打開鍵盤並帶入文字，送出的文字訊息才會修改草稿。
     return [line.text_message("\n".join(lines), [("好", f"draft=confirm&nonce={nonce}"),

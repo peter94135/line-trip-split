@@ -215,3 +215,8 @@ dialog::backdrop { background: rgb(20 20 19 / .65); }
 .deleted-row > span:first-child > strong { text-decoration: line-through; color: var(--muted); }
 .deleted-note { color: var(--red); }
 .warn .secondary { margin-left: 8px; min-height: 36px; }
+
+.trip-dates { white-space: nowrap; }
+.rate-row { display: grid; grid-template-columns: minmax(6.5em, 1fr) minmax(5em, 2fr) auto; gap: .6rem; align-items: end; }
+#refresh svg { width: 20px; height: 20px; }
+#refresh { padding: .65rem; }

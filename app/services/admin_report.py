@@ -35,8 +35,9 @@ def _latest(session: Session, model, column) -> dict[int, object]:
 def trip_rows(session: Session) -> list[dict]:
     names = _names(session)
     members = dict(session.exec(select(TripMember.trip_id, func.count()).group_by(TripMember.trip_id)).all())
-    live = dict(session.exec(select(Expense.trip_id, func.count()).where(Expense.deleted_at.is_(None))
-                             .group_by(Expense.trip_id)).all())
+    live = {(trip_id, kind): count for trip_id, kind, count in session.exec(
+        select(Expense.trip_id, Expense.kind, func.count()).where(Expense.deleted_at.is_(None))
+        .group_by(Expense.trip_id, Expense.kind))}
     removed = dict(session.exec(select(Expense.trip_id, func.count()).where(Expense.deleted_at.is_not(None))
                                 .group_by(Expense.trip_id)).all())
     activity = [_latest(session, Expense, Expense.created_at), _latest(session, Transfer, Transfer.created_at),
@@ -47,7 +48,8 @@ def trip_rows(session: Session) -> list[dict]:
         rows.append(dict(
             id=trip.id, name=trip.name, status=trip.status, start_date=trip.start_date, end_date=trip.end_date,
             settle_currency=trip.settle_currency, creator=names.get(trip.created_by, "—"),
-            line_group=bool(trip.line_group_id), members=members.get(trip.id, 0), expenses=live.get(trip.id, 0),
+            line_group=bool(trip.line_group_id), members=members.get(trip.id, 0),
+            expenses=live.get((trip.id, "expense"), 0), refunds=live.get((trip.id, "refund"), 0),
             deleted_expenses=removed.get(trip.id, 0), total=trips.total(session, trip).total,
             last_activity=max(moments), created_at=trip.created_at, deleted_at=trip.deleted_at,
         ))

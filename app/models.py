@@ -117,6 +117,7 @@ class ExpenseShare(Share, table=True):
 
 
 class Transfer(SQLModel, table=True):
+    source: str | None = None
     __table_args__ = (
         ForeignKeyConstraint(["trip_id", "from_id"], ["tripmember.trip_id", "tripmember.member_id"]),
         ForeignKeyConstraint(["trip_id", "to_id"], ["tripmember.trip_id", "tripmember.member_id"]),
@@ -146,6 +147,12 @@ class AuditLog(SQLModel, table=True):
     channel: str
     action: str
     detail: str = ""
+
+
+class WebAiRequest(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    member_id: int = Field(foreign_key="member.id", index=True)
+    at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime, index=True)
 
 
 class CategoryMemory(SQLModel, table=True):

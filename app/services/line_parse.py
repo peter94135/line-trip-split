@@ -4,7 +4,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Literal
 
 CURRENCIES = {
@@ -239,6 +239,6 @@ def parse_trip(text: str, today: date) -> tuple[str, date | None, date | None, s
 
 
 def money(amount: float | Decimal, currency: str) -> str:
-    symbol = CURRENCIES.get(currency, (f"{currency} ",))[0]
-    value = Decimal(str(amount))
-    return f"{symbol}{value:,.0f}" if value == value.to_integral_value() else f"{symbol}{value:,.2f}"
+    value = Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    number = f"{abs(value):,.2f}".rstrip("0").rstrip(".")
+    return f"{'−' if value < 0 else ''}{currency} {number}"

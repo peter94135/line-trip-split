@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     line_login_channel_id: str = ""
     liff_id: str = ""
     gemini_api_key: str = ""
+    web_ai_per_minute: int = Field(default=6, gt=0)
+    web_ai_per_day: int = Field(default=60, gt=0)
     gemini_model: str = "gemini-3.5-flash"
     gemini_thinking_level: str = "minimal"
     gemini_timeout_s: int = Field(default=25, gt=0)

@@ -3,16 +3,16 @@
 import re
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
-from urllib.parse import parse_qs, quote
+from urllib.parse import parse_qs
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import update
 from sqlmodel import Session, select
 
 from app.config import get_settings
-from app.models import Expense, LineChat, LineDelivery, Member, Transfer, Trip, TripMember, utcnow
-from app.services import fx, gemini, line, line_draft, line_edit, line_settlement, trip_stats, trips
+from app.models import LineChat, LineDelivery, Member, Transfer, Trip, TripMember, utcnow
+from app.services import gemini, line, line_draft, line_edit, line_settlement, trips
+from app.services.line_reports import group_invite, read_command, reply, statistics_reply, trip_link
 from app.services.line_parse import (
     RECORD, CommandError, Draft, IncomingText, incoming_text, is_command, money, normalize, parse_quick,
     parse_repayment, parse_trip,
@@ -31,10 +31,6 @@ HELP = (
     "旅行結束：結束帳本"
 )
 PHOTO_REQUEST = re.compile(r"^(?:這張(?:照片|收據|發票)?|照片|收據|發票)(?=$|[\s,:])")
-
-
-def reply(text: str, buttons: list[line.Button] | None = None) -> list[dict]:
-    return [line.text_message(text, buttons)]
 
 
 def interested(event: dict) -> bool:
@@ -116,23 +112,16 @@ def _open(session: Session, text: str, group_id: str | None, user_id: str, when:
     session.flush()
     trips.enroll(session, trip.id, creator.id)
     if group_id:
-        join = _group_invite(trip) or "\n請每位成員傳「加入」。"
+        join = group_invite(trip) or "\n請每位成員傳「加入」。"
     else:
         _select_private(session, user_id, trip.id)
-        join = _trip_link(trip, label="開啟帳本：")
+        join = trip_link(trip, label="開啟帳本：")
     return reply(f"已開帳本「{trip.name}」｜記帳幣別 {trip.default_currency}｜結算幣別 {trip.settle_currency}"
                  f"{join}\n開始記帳可傳「記 晚餐 3000」。")
 
 
 def _already_open(trip: Trip) -> list[dict]:
-    return reply(f"群組已有進行中的「{trip.name}」。請先結束目前的帳本。" + _group_invite(trip))
-
-
-def _group_invite(trip: Trip) -> str:
-    settings = get_settings()
-    if not settings.liff_id or not settings.line_login_channel_id:
-        return ""
-    return f"\n開啟帳本，登入後即加入：\n{trips.invite_url(trip, settings.liff_id)}"
+    return reply(f"群組已有進行中的「{trip.name}」。請先結束目前的帳本。" + group_invite(trip))
 
 
 def _private_choices(session: Session, user_id: str, *, include_closed: bool = False) -> list[Trip]:
@@ -158,70 +147,6 @@ def _pick_private(choices: list[Trip]) -> list[dict]:
         return reply("目前沒有進行中的帳本。請在旅伴群組傳「加入」，或傳「開帳本 京都」。")
     options = [(trip.name, f"trip={trip.id}") for trip in choices]
     return reply("請選擇帳本，也可輸入「帳本 帳本名稱」。\n" + "\n".join(trip.name for trip in choices), options)
-
-
-def _trip_header(trip: Trip) -> str:
-    dates = " ～ ".join(day.isoformat() for day in (trip.start_date, trip.end_date) if day)
-    return f"{trip.name}{f'｜{dates}' if dates else ''}｜{'進行中' if trip.status == 'open' else '已結束'}"
-
-
-def _trip_link(trip: Trip, *, tab: str = "", label: str = "") -> str:
-    liff_id = get_settings().liff_id
-    if not liff_id:
-        return ""
-    url = f"https://liff.line.me/{quote(liff_id, safe='')}?trip={trip.id}"
-    return "\n" + label + url + (f"&tab={tab}" if tab else "")
-
-
-def _settle(session: Session, trip: Trip, speaker: int, *, personal: bool = False, closing: bool = False) -> list[dict]:
-    result = trips.total(session, trip)
-    roster = trips.people(session, trip.id)
-    label = lambda member_id: "我" if personal and member_id == speaker else trips.name_of(roster, member_id)
-    fmt = lambda amount: money(amount, trip.settle_currency)
-    lines = []
-    missing = [f"支出 #{key}" for key in result.missing_expense_ids] + [f"還款 #{key}" for key in result.missing_transfer_ids]
-    if missing:
-        lines.append("⚠️ 以下紀錄待換算，暫未計入結算：" + "、".join(missing))
-    lines.append(f"{_trip_header(trip)}｜共 {fmt(result.total)}")
-    for member_id in ([speaker] if personal else roster):
-        lines.append(f"{label(member_id)}　付 {fmt(result.paid.get(member_id, 0))}｜分擔 {fmt(result.owed.get(member_id, 0))}")
-    payments = [f"{label(payment.from_id)} → {label(payment.to_id)}　{fmt(payment.amount)}"
-                for payment in result.payments if not personal or speaker in (payment.from_id, payment.to_id)]
-    lines.extend(["結算", *(payments or ["目前無須轉帳"])])
-    if personal:
-        link = _trip_link(trip, tab="settle", label="結算明細：")
-    elif closing:
-        link = _trip_link(trip, tab="stats", label="統計：")
-    else:
-        link = _trip_link(trip)
-    return reply("\n".join(lines) + link)
-
-
-def closing_summary(session: Session, trip: Trip, actor_id: int) -> list[dict]:
-    """網頁結束帳本時推播到群組，內容與 LINE「結束帳本」的回覆相同。"""
-    [message] = _settle(session, trip, actor_id, closing=True)
-    message["text"] = f"{trips.name_of(trips.people(session, trip.id), actor_id)} 在網頁結束帳本\n{message['text']}"
-    return [message]
-
-
-def _statistics(session: Session, trip: Trip, speaker: int, *, personal: bool) -> list[dict]:
-    stats = trip_stats.calculate(session, trip)
-    currency = stats["currency"]
-    if personal:
-        total = stats["by_member"][speaker]["owed"]
-        lines = [f"{trip.name}｜我的分擔 {money(total, currency)}"]
-        for row in stats["by_category"]:
-            category = row["category"]
-            amounts = stats["by_member_category"][category].get(speaker)
-            if amounts and amounts["owed"]:
-                lines.append(f'{category}　{money(amounts["owed"], currency)}')
-    else:
-        lines = [f'{trip.name}｜總花費 {money(stats["total"], currency)}']
-        for row in stats["by_category"][:5]:
-            lines.append(f'{row["category"]}　{money(row["amount"], currency)}（{row["percent"]:g}%）')
-    if stats["missing_count"]:
-        lines.append(f'{stats["missing_count"]} 筆缺匯率未計入')
-    return reply("\n".join(lines) + _trip_link(trip, tab="stats", label="統計："))
 
 
 def _persist(session: Session, trip: Trip, speaker: int, roster: dict, pending: line_draft.Pending,
@@ -407,7 +332,7 @@ def _repay(session: Session, trip: Trip, group_id: str | None, user_id: str, inc
     if recipient == speaker:
         raise CommandError("還款對象必須是另一位帳本成員。")
     session.add(Transfer(trip_id=trip.id, from_id=speaker, to_id=recipient, amount=float(amount),
-                         currency=currency, rate=rate, amount_settle=value, created_by=speaker))
+                         currency=currency, rate=rate, amount_settle=value, created_by=speaker, source="line_text"))
     pending = "（待換算）" if value is None else ""
     if incoming.text == "交公費" or incoming.text.startswith("交公費 "):
         return reply(f"已記：你交給{trips.name_of(roster, recipient)}公費 {money(amount, currency)}{pending}")
@@ -450,48 +375,23 @@ def _default_payer(session: Session, trip: Trip, actor: Member | None, group_id:
     return reply(f"預設付款人改為{label}。{tail}")
 
 
-def _details(session: Session, trip: Trip) -> list[dict]:
-    roster = trips.people(session, trip.id)
-    rows = session.exec(select(Expense).where(Expense.trip_id == trip.id, Expense.deleted_at.is_(None))
-                        .order_by(Expense.spent_on.desc(), Expense.id.desc()).limit(15)).all()
-    lines = [f"{trip.name}｜最近 15 筆"]
-    for row in rows:
-        kind_label, verb = ("退款｜", "收") if row.kind == "refund" else ("", "付")
-        lines.append(f"{row.spent_on:%m/%d} {kind_label}{row.item}　{money(row.amount, row.currency)}｜{trips.name_of(roster, row.payer_id)}{verb}")
-    if not rows:
-        lines.append("目前沒有支出。")
-    return reply("\n".join(lines) + _trip_link(trip))
-
-
-def _read_command(session: Session, trip: Trip, speaker: int, user_id: str, text: str) -> list[dict]:
-    if text == "帳本":
-        link = _group_invite(trip) if trip.line_group_id and trip.status == "open" else ""
-        roster = trips.people(session, trip.id)
-        payer = f"\n預設付款人 {trips.name_of(roster, trip.default_payer_id)}" if trip.default_payer_id in roster else ""
-        return reply(f"{_trip_header(trip)}\n記帳幣別 {trip.default_currency}｜結算幣別 {trip.settle_currency}{payer}"
-                     + (link or _trip_link(trip)))
-    if text in ("加入", "成員"):
-        roster = trips.people(session, trip.id)
-        if text == "加入":
-            status = "已加入" if roster[speaker][0].active else "已在帳本內，目前分攤已停用"
-            return reply(f"{status}「{trip.name}」。")
-        labels = [trips.name_of(roster, key) + ("（已停用）" if not row[0].active else "") for key, row in roster.items()]
-        return reply(f"{trip.name}｜成員 {len(roster)} 人\n" + "\n".join(labels))
-    if text == "明細":
-        return _details(session, trip)
-    if text == "結算":
-        return [line_settlement.card(session, trip)]
-    if text == "結束帳本":
-        if trip.status == "closed":
-            return reply(f"「{trip.name}」已結束。")
-        if trip.created_by != speaker and get_settings().line_admin_user_id != user_id:
-            raise CommandError("請由帳本建立者或管理員結束帳本。")
-        trip.status = "closed"
-        trips.audit(session, trip.id, speaker, "line", "結束帳本")
-    return _settle(session, trip, speaker, personal=text == "我欠多少", closing=text == "結束帳本")
-
-
 def handle(session: Session, event: dict) -> list[dict]:
+    group = (event.get("source") or {}).get("groupId")
+    message = event.get("message") or {}
+    text = incoming_text(message).text if message.get("type") == "text" else ""
+    # 只在開帳和查名單時提醒；記帳時每筆都提醒太吵，也會擠掉第 5 張卡片。
+    check = text in ("加入", "成員", "帳本") or text.startswith("開帳本")
+    count = line.group_count(group) if group and check else None
+    messages = _handle_event(session, event)
+    if count is not None and 0 < len(messages) < 5 and (trip := trips.open_in_group(session, group)):
+        warning = trips.group_warning(trips.people(session, trip.id), count)
+        if warning:
+            # 放在卡片前，保留最後一則訊息的 Quick Reply。
+            messages.insert(0, line.text_message(warning))
+    return messages
+
+
+def _handle_event(session: Session, event: dict) -> list[dict]:
     source = event.get("source") or {}
     group_id, user_id = source.get("groupId"), source.get("userId")
     kind = event.get("type")
@@ -505,30 +405,34 @@ def handle(session: Session, event: dict) -> list[dict]:
         return []
     if not user_id:
         return []
-    action = None
-    nonce = None
     if kind == "postback":
-        data = {key: values[0] for key, values in parse_qs((event.get("postback") or {}).get("data", "")).items()}
-        if "settle" in data:
-            return [line_settlement.handle(session, group_id, user_id, data)]
-        if "exp" in data:
-            return line_edit.handle(session, group_id, user_id, data)
-        if not group_id and "trip" in data:
-            choices = _private_choices(session, user_id, include_closed=True)
-            match = next((trip for trip in choices if str(trip.id) == data["trip"]), None)
-            if not match:
-                return _pick_private(choices)
-            _select_private(session, user_id, match.id)
-            return reply(f"已選擇「{match.name}」。")
-        if data.get("draft") in ("confirm", "cancel"):
-            action, nonce = data["draft"], data.get("nonce", "")
-            message = {"type": "text", "text": ""}
-        elif data.get("cmd") == "members":
-            message = {"type": "text", "text": "成員"}
-        else:
-            return []
-    else:
-        message = event.get("message") or {}
+        return _postback(session, event, group_id, user_id)
+    return _message(session, event, group_id, user_id, event.get("message") or {})
+
+
+def _postback(session: Session, event: dict, group_id: str | None, user_id: str) -> list[dict]:
+    data = {key: values[0] for key, values in parse_qs((event.get("postback") or {}).get("data", "")).items()}
+    if "settle" in data:
+        return [line_settlement.handle(session, group_id, user_id, data)]
+    if "exp" in data:
+        return line_edit.handle(session, group_id, user_id, data)
+    if not group_id and "trip" in data:
+        choices = _private_choices(session, user_id, include_closed=True)
+        match = next((trip for trip in choices if str(trip.id) == data["trip"]), None)
+        if not match:
+            return _pick_private(choices)
+        _select_private(session, user_id, match.id)
+        return reply(f"已選擇「{match.name}」。")
+    if data.get("draft") in ("confirm", "cancel"):
+        key = f"{group_id}:{user_id}" if group_id else user_id
+        return _pending_action(session, key, group_id, user_id, IncomingText("", False, {}), _event_time(event),
+                               data["draft"], nonce=data.get("nonce", ""))
+    if data.get("cmd") == "members":
+        return _message(session, event, group_id, user_id, {"type": "text", "text": "成員"})
+    return []
+
+
+def _message(session: Session, event: dict, group_id: str | None, user_id: str, message: dict) -> list[dict]:
     image_id = message.get("id") if message.get("type") == "image" else None
     if message.get("type") != "text" and not image_id:
         return [] if group_id else reply("請用文字或收據照片記帳。傳「說明」查看用法。")
@@ -542,22 +446,11 @@ def handle(session: Session, event: dict) -> list[dict]:
         return _open(session, text, group_id, user_id, _event_time(event))
 
     key = f"{group_id}:{user_id}" if group_id else user_id
-    if action is None:
-        action = line_draft.CONFIRM.get(text)
-        if action is None and line_draft.correction(text) is not None:
-            action = "edit"
+    action = line_draft.CONFIRM.get(text)
+    if not action and line_draft.correction(text) is not None:
+        action = "edit"
     if action:
-        chat = session.get(LineChat, key)
-        pending = line_draft.get(chat)
-        if not pending or (nonce is not None and chat.draft_nonce != nonce):
-            return reply("這份記帳草稿已失效。") if kind == "postback" else []
-        draft_trip = session.get(Trip, pending.trip_id)
-        if not draft_trip or draft_trip.deleted_at is not None or (group_id and draft_trip.line_group_id != group_id):
-            raise CommandError("找不到這份草稿的帳本，請重新記帳。")
-        if not group_id and chat.selected_trip_id not in (None, draft_trip.id):
-            raise CommandError("這份草稿屬於另一個帳本，請先選回該帳本。")
-        return _draft_action(session, draft_trip, _member(session, user_id), group_id, user_id, chat, pending,
-                             action, incoming, _event_time(event))
+        return _pending_action(session, key, group_id, user_id, incoming, _event_time(event), action)
 
     statistics = text in ("統計", "我的統計")
     if statistics:
@@ -599,7 +492,7 @@ def handle(session: Session, event: dict) -> list[dict]:
         if not membership:
             return reply("請先傳「加入」加入帳本，再查看統計。" if trip.status == "open"
                          else "這本帳已結束，請由原帳本成員查詢。")
-        return _statistics(session, trip, actor.id, personal=text == "我的統計")
+        return statistics_reply(session, trip, actor.id, personal=text == "我的統計")
 
     reading = text in ("帳本", "成員", "明細", "結算", "我欠多少", "結束帳本", "加入")
     if trip.status == "closed":
@@ -607,13 +500,13 @@ def handle(session: Session, event: dict) -> list[dict]:
             return reply("這本帳已結束。傳「開帳本 旅程名稱」可開新帳本。")
         if not membership:
             return reply("這本帳已結束，請由原帳本成員查詢。")
-        return _read_command(session, trip, actor.id, user_id, text)
+        return read_command(session, trip, actor.id, user_id, text)
     if reading:
         # 只有建立者與管理員能結束帳本，其他人不會因嘗試結束而加入。
         if text == "結束帳本" and not membership and get_settings().line_admin_user_id != user_id:
             raise CommandError("請由帳本建立者或管理員結束帳本。")
         speaker, _ = _enroll(session, trip, user_id, group_id, {})
-        return _read_command(session, trip, speaker, user_id, text)
+        return read_command(session, trip, speaker, user_id, text)
     if text in ("已還", "交公費") or text.startswith(("已還 ", "交公費 ")):
         return _repay(session, trip, group_id, user_id, incoming)
     if text == "預設付款人" or text.startswith("預設付款人 "):
@@ -624,3 +517,18 @@ def handle(session: Session, event: dict) -> list[dict]:
             return photo
         return _record(session, trip, group_id, user_id, key, incoming, message["text"], when)
     return reply(HELP) if incoming.addressed else []
+
+
+def _pending_action(session: Session, key: str, group_id: str | None, user_id: str, incoming: IncomingText,
+                    when: datetime, action: str, nonce: str | None = None) -> list[dict]:
+    chat = session.get(LineChat, key)
+    pending = line_draft.get(chat)
+    if not pending or (nonce is not None and chat.draft_nonce != nonce):
+        return reply("這份記帳草稿已失效。") if nonce is not None else []
+    draft_trip = session.get(Trip, pending.trip_id)
+    if not draft_trip or draft_trip.deleted_at is not None or (group_id and draft_trip.line_group_id != group_id):
+        raise CommandError("找不到這份草稿的帳本，請重新記帳。")
+    if not group_id and chat.selected_trip_id not in (None, draft_trip.id):
+        raise CommandError("這份草稿屬於另一個帳本，請先選回該帳本。")
+    return _draft_action(session, draft_trip, _member(session, user_id), group_id, user_id, chat, pending,
+                         action, incoming, when)

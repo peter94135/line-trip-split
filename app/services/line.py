@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import logging
 import time
+from functools import lru_cache
 from urllib.parse import quote
 
 import httpx
@@ -74,6 +75,24 @@ def _request(method, path, payload=None, *, retry_key=None) -> dict:
         raise LineError(f"LINE API HTTP {response.status_code}", retryable=response.status_code >= 500,
                         reply_unaccepted=expired)
     return response.json() if response.content else {}
+
+
+def group_count(group_id: str | None) -> int | None:
+    if not group_id or not get_settings().line_channel_access_token:
+        return None
+    # 群組人數很少變動，記住 10 分鐘，網頁開帳本時多半不必等 LINE。
+    return _cached_count(group_id, int(time.monotonic() // 600))
+
+
+@lru_cache(maxsize=256)
+def _cached_count(group_id: str, window: int) -> int | None:
+    try:
+        response = httpx.get(f"{API}/group/{quote(group_id, safe='')}/members/count", headers=_headers(), timeout=2)
+        response.raise_for_status()
+        count = response.json().get("count")
+        return count if type(count) is int and count >= 0 else None
+    except (httpx.HTTPError, ValueError, AttributeError):
+        return None
 
 
 def get_profile(user_id: str, group_id: str | None = None) -> dict:

@@ -110,6 +110,7 @@ cp .env.example .env
    - Size：Full
    - Endpoint URL：`https://<你的網址>/liff/`
    - Scopes：`openid`、`profile`
+   - 直接分享邀請給 LINE 好友或群組時，請在該 channel 的 **LIFF → shareTargetPicker** 閱讀並同意資訊使用條款，按 **Enable**。無法使用分享選單的環境仍可複製連結。[LINE 官方說明](https://developers.line.biz/en/docs/liff/developing-liff-apps/#using-share-target-picker)
 4. 把 channel 狀態從 Developing 改成 **Published**，朋友才能登入。Developing 狀態下只有 channel 管理員和測試者能登入。注意：改成 Published 之後就無法改回。
 
 ### 5. 套用設定並驗證
@@ -176,6 +177,8 @@ docker compose up -d --build trip-split
 ```sh
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -r requirements-dev.txt
+# 已安裝 Google Chrome 可直接測試，其他環境先安裝 Chromium
+.venv/bin/python -m playwright install chromium
 .venv/bin/python -m pytest -q
 ```
 

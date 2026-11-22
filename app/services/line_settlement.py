@@ -27,19 +27,21 @@ def _text(text: str) -> dict:
     return {"type": "text", "text": text, "wrap": True, "size": "sm"}
 
 
-def card(session: Session, trip: Trip) -> dict:
+def card(session: Session, trip: Trip, *, closing: str = "") -> dict:
     # 成員或支出可能剛透過同一筆交易更新版本。
     session.refresh(trip, attribute_names=["ledger_version"])
     result = trips.total(session, trip)
     roster = trips.people(session, trip.id)
     currency = trip.settle_currency
-    header = [f"{trip.name}｜結算", f"總花費 {money(result.total, currency)}", "成員結餘"]
+    header = [f"{trip.name}｜{closing or '結算'}", f"總花費 {money(result.total, currency)}", "成員結餘"]
     missing = len(result.missing_expense_ids) + len(result.missing_transfer_ids)
     if missing:
         header.append(f"{missing} 筆待換算，暫未計入結算")
     for member_id in list(roster)[:MAX_MEMBERS]:
         name = trips.name_of(roster, member_id)[:60]
-        header.append(f"{name}　{money(result.balances.get(member_id, 0), currency)}")
+        balance = result.balances.get(member_id, 0)
+        status = f"{'應收' if balance > 0 else '應付'} {money(abs(balance), currency)}" if balance else "已結清"
+        header.append(f"{name}　{status}")
     if len(roster) > MAX_MEMBERS:
         header.append(f"其餘 {len(roster) - MAX_MEMBERS} 位成員請開網頁")
     header.append("轉帳建議")
@@ -73,9 +75,13 @@ def card(session: Session, trip: Trip) -> dict:
         contents.append(_text(tail))
         summary.append(tail)
     if liff_id := get_settings().liff_id:
-        uri = f"https://liff.line.me/{quote(liff_id, safe='')}?trip={trip.id}&tab=settle"
+        base = f"https://liff.line.me/{quote(liff_id, safe='')}?trip={trip.id}"
+        links = [("查看帳本", "settle")]
+        if closing:
+            links.append(("查看統計", "stats"))
         message["contents"]["footer"] = {"type": "box", "layout": "vertical", "contents": [
-            {"type": "button", "height": "sm", "action": {"type": "uri", "label": "查看帳本", "uri": uri}},
+            {"type": "button", "height": "sm", "action": {"type": "uri", "label": label, "uri": f"{base}&tab={tab}"}}
+            for label, tab in links
         ]}
     message["altText"] = line.card_message("\n".join(summary), [])["altText"]
     return message
@@ -106,7 +112,7 @@ def handle(session: Session, group_id: str | None, user_id: str, data: dict[str,
         raise CommandError(UPDATED)
 
     session.add(Transfer(trip_id=trip.id, from_id=from_id, to_id=to_id, amount=float(payment.amount),
-                         currency=trip.settle_currency, rate=1, amount_settle=float(payment.amount), created_by=actor.id))
+                         currency=trip.settle_currency, rate=1, amount_settle=float(payment.amount), created_by=actor.id, source="line_text"))
     session.flush()
     trips.audit(session, trip.id, actor.id, "line", "標記已付" if action == "paid" else "標記已收到",
                 f"成員 #{from_id} → #{to_id} {payment.amount}")

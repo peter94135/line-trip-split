@@ -1,64 +1,20 @@
 import csv
 import io
 import json
-import time
 
-import httpx
 import pytest
-from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
-from app import auth
 from app.config import get_settings
-from app.main import app
-from app.models import Expense, GeminiCall, LineDelivery, LineInbox, Member, Trip, TripMember
+from app.models import Expense, GeminiCall, LineDelivery, LineInbox, Trip, TripMember
 from app.services import line, line_chat, line_edit
 from app.services.line_parse import CommandError
-
-
-@pytest.fixture
-def web(db_engine, monkeypatch):
-    monkeypatch.setenv("LINE_LOGIN_CHANNEL_ID", "test-login-channel")
-    monkeypatch.setenv("LIFF_ID", "test-liff")
-    monkeypatch.setenv("LINE_CHANNEL_SECRET", "")
-    monkeypatch.setenv("LINE_CHANNEL_ACCESS_TOKEN", "")
-    monkeypatch.setenv("ADMIN_PASSWORD", "test-admin-password")
-    get_settings.cache_clear()
-
-    def verify(url, *, data, timeout):
-        assert url == auth.VERIFY_URL and data["client_id"] == "test-login-channel" and timeout > 0
-        name = data["id_token"]
-        if name == "invalid":
-            return httpx.Response(400)
-        return httpx.Response(200, json={"sub": f"U-{name}", "name": name, "iss": auth.LINE_ISSUER,
-                                         "aud": "wrong" if name == "wrong-audience" else data["client_id"],
-                                         "exp": time.time() + 1000})
-
-    monkeypatch.setattr(auth.httpx, "post", verify)
-    monkeypatch.setattr(line, "get_profile", lambda user, group: {"displayName": user.removeprefix("U-")})
-    with TestClient(app) as client:
-        with Session(db_engine) as session:
-            alice = Member(line_user_id="U-Alice", line_name="Alice")
-            bob = Member(line_user_id="U-Bob", line_name="Bob")
-            session.add_all([alice, bob]); session.flush()
-            trip = Trip(name="京都", created_by=alice.id, line_group_id="C-test", invite_code="AbCd1234", fixed_rates={"JPY": .2})
-            session.add(trip); session.flush()
-            session.add_all([TripMember(trip_id=trip.id, member_id=person.id) for person in (alice, bob)])
-            ids = (trip.id, alice.id, bob.id)
-            session.commit()
-
-        def login(name):
-            response = client.post("/api/auth/line", json={"id_token": name})
-            assert response.status_code == 200
-            return {"Authorization": "Bearer " + response.json()["token"]}
-
-        yield client, login, ids
 
 
 def test_liff_login_invitation_and_membership_isolation(web):
     client, login, (trip, _, _) = web
     assert client.get("/liff/").status_code == 200
-    assert client.get("/assets/liff.js?v=17").status_code == 200
+    assert client.get("/assets/liff.js?v=18").status_code == 200
     assert client.get("/api/liff/config").json()["liff_id"] == "test-liff"
     assert client.post("/api/auth/line", json={"id_token": "invalid"}).status_code == 401
     assert client.post("/api/auth/line", json={"id_token": "wrong-audience"}).status_code == 401
@@ -92,9 +48,9 @@ def test_closing_trip_on_web_pushes_settlement_to_group_once(web, monkeypatch):
     assert client.post(base + "/close", headers=alice).status_code == 204
     assert len(pushes) == 1 and pushes[0]["to"] == "C-test"
     [message] = pushes[0]["messages"]
-    assert message["type"] == "text"
-    assert message["text"].startswith("Alice 在網頁結束帳本\n京都｜已結束｜共 $100")
-    assert "Bob → Alice　$50" in message["text"] and "tab=stats" in message["text"]
+    assert message["type"] == "flex"
+    assert "Alice 在網頁結束帳本" in message["altText"] and "Bob → Alice　TWD 50" in message["altText"]
+    assert message["contents"]["footer"]["contents"][-1]["action"]["uri"].endswith("&tab=stats")
     assert client.post(base + "/close", headers=alice).status_code == 204
     assert len(pushes) == 1
 
@@ -124,11 +80,11 @@ def test_web_record_changes_send_line_cards_to_bound_group_after_commit(web, db_
     saved = client.post(base + "/expenses", headers=alice, json=expense)
     assert saved.status_code == 201
     entry_id = saved.json()["id"]
-    assert pushes[0][0]["altText"].startswith("已記：晚餐 $100｜餐飲\nAlice付")
+    assert pushes[0][0]["altText"].startswith("已記：晚餐 TWD 100｜餐飲\nAlice付")
     assert set(buttons(pushes[0][0])) == {"改分攤", "改付款人", "改類別", "刪除"}
     entry_path = base + f"/expenses/{entry_id}"
     assert client.put(entry_path, headers=alice, json={**expense, "amount": "120"}).status_code == 200
-    assert pushes[1][0]["altText"].startswith("Alice 已修改：晚餐 $120")
+    assert pushes[1][0]["altText"].startswith("Alice 已修改：晚餐 TWD 120")
     assert client.delete(entry_path, headers=alice).status_code == 204
     assert pushes[2][0]["altText"] == "Alice 已刪除「晚餐」。"
     assert buttons(pushes[2][0]) == {"復原": f"exp=undo&id={entry_id}"}
@@ -142,14 +98,14 @@ def test_web_record_changes_send_line_cards_to_bound_group_after_commit(web, db_
                           {**expense, "item": "住宿退費", "kind": "refund"}]}
     assert client.post(base + "/expenses/bulk", headers=alice, json=batch).status_code == 201
     assert len(pushes) == 4 and len(pushes[3]) == 2
-    assert pushes[3][0]["altText"].startswith("已記：早餐 US$100")
+    assert pushes[3][0]["altText"].startswith("已記：早餐 USD 100")
     assert "退款｜住宿退費" in pushes[3][1]["altText"]
     transfer = {"from_id": bob_id, "to_id": alice_id, "amount": "50", "currency": "TWD"}
     repaid = client.post(base + "/transfers", headers=alice, json=transfer)
     assert repaid.status_code == 201
-    assert pushes[4][0]["altText"] == "已記還款：Bob → Alice $50"
+    assert pushes[4][0]["altText"] == "已記還款：Bob → Alice TWD 50"
     assert client.delete(base + f"/transfers/{repaid.json()['id']}", headers=alice).status_code == 204
-    assert pushes[5][0]["altText"] == "Alice 已刪除還款：Bob → Alice $50"
+    assert pushes[5][0]["altText"] == "Alice 已刪除還款：Bob → Alice TWD 50"
 
     # 帳本設定關閉群組通知後，網頁改帳不再推播，也不排補送。
     settings = {"name": "京都", "timezone": "Asia/Taipei", "default_currency": "TWD", "settle_currency": "TWD",
@@ -195,16 +151,16 @@ def test_web_expenses_immediately_change_line_settlement_and_export(web, db_engi
             session.commit()
             return text
 
-    assert "Bob → Alice　$500" in line_settlement()
+    assert "Bob → Alice　TWD 500" in line_settlement()
     changed = {**body, "amount": "1500", "split_mode": "exact",
                "shares": [{"member_id": alice_id, "amount": "700"}, {"member_id": bob_id, "amount": "700"}]}
     assert client.put(entry, headers=bob, json=changed).status_code == 422
     changed["shares"][1]["amount"] = "800"
     assert client.put(entry, headers=bob, json=changed).status_code == 200
-    assert "Bob → Alice　$800" in line_settlement()
+    assert "Bob → Alice　TWD 800" in line_settlement()
     assert client.post(base + "/transfers", headers=bob, json={"from_id": bob_id, "to_id": alice_id, "amount": "200",
                                                               "currency": "TWD"}).status_code == 201
-    assert "Bob → Alice　$600" in line_settlement()
+    assert "Bob → Alice　TWD 600" in line_settlement()
 
     exported = client.get(base + "/export.csv", headers=alice)
     assert exported.content.startswith(b"\xef\xbb\xbf")
@@ -245,7 +201,7 @@ def test_statistics_match_rounded_ledger_and_line(web, db_engine, monkeypatch):
              "message": {"type": "text", "text": "統計"}}
     with Session(db_engine) as session:
         text = line_chat.handle(session, event)[0]["text"]
-        assert "餐飲　$101（66.89%）" in text and "1 筆缺匯率未計入" in text and "&tab=stats" in text
+        assert "餐飲　TWD 101（66.89%）" in text and "1 筆缺匯率未計入" in text and "&tab=stats" in text
 
 
 def test_payment_notes_and_marking_after_close(web, db_engine):
@@ -475,6 +431,8 @@ def test_delete_unused_member_preserves_historical_members(web, db_engine):
     assert client.post(path + "/transfers", headers=alice, json={
         "from_id": alice_id, "to_id": recipient, "amount": "200", "currency": "TWD",
     }).status_code == 201
+    members = client.get(path, headers=alice).json()["members"]
+    assert not any(m["can_delete"] for m in members)
     for member_id in (payer, bob_id, recipient):
         blocked = client.delete(f"{people}/{member_id}", headers=alice)
         assert blocked.status_code == 409 and "保留歷史帳目" in blocked.json()["detail"]
@@ -525,9 +483,16 @@ def test_liff_page_inlines_config_and_versioned_assets_are_immutable(web):
     client, _, _ = web
     page = client.get("/liff/")
     assert page.headers["cache-control"] == "no-store"
+    for response in (page, client.get("/admin")):
+        directives = dict(part.strip().split(" ", 1) for part in response.headers["Content-Security-Policy"].split(";"))
+        assert directives["frame-ancestors"] == "'none'"
+        assert response.headers["X-Frame-Options"] == "DENY"
+        assert directives["script-src"].split() == [
+            "'self'", "https://static.line-scdn.net/liff/", "https://static.line-scdn.net/lui/"]
+
     config = page.text.split('<script id="liff-config" type="application/json">', 1)[1].split("</script>", 1)[0]
     assert json.loads(config) == client.get("/api/liff/config").json()
-    assert "immutable" in client.get("/assets/liff.js?v=17").headers["cache-control"]
+    assert "immutable" in client.get("/assets/liff.js?v=18").headers["cache-control"]
     assert "immutable" not in client.get("/assets/liff.js").headers.get("cache-control", "")
 
 
@@ -562,3 +527,46 @@ def test_default_payer_setting_applies_to_ai_drafts(web, db_engine):
     assert client.get(base, headers=alice).json()["default_payer_id"] == bob_id
     assert client.put(base + "/settings", headers=alice, json={**settings, "default_payer_id": 0}).status_code == 204
     assert client.get(base, headers=alice).json()["default_payer_id"] is None
+
+
+def test_ai_limits_shared_by_text_photo_and_trips(web, db_engine, monkeypatch):
+    from datetime import timedelta
+    from concurrent.futures import ThreadPoolExecutor
+    from app.models import WebAiRequest, utcnow
+    from app.services import web_ai
+
+    client, login, (trip_id, alice_id, _) = web
+    alice, bob = login("Alice"), login("Bob")
+    monkeypatch.setenv("WEB_AI_PER_MINUTE", "1")
+    monkeypatch.setenv("WEB_AI_PER_DAY", "2")
+    get_settings.cache_clear()
+    calls = []
+    monkeypatch.setattr(web_ai, "drafts", lambda *args, **kwargs: calls.append(1) or {"expenses": []})
+    with Session(db_engine) as session:
+        other = Trip(name="另一趟")
+        session.add(other)
+        session.flush()
+        other_id = other.id
+        session.add(TripMember(trip_id=other.id, member_id=alice_id))
+        session.commit()
+    def parse():
+        return client.post(f"/api/trips/{trip_id}/ai/parse", headers=alice, json={"text": "晚餐 60"})
+    with ThreadPoolExecutor(2) as pool:
+        assert sorted(r.status_code for r in pool.map(lambda _: parse(), range(2))) == [200, 429]
+    photo = f"/api/trips/{other_id}/ai/photo"
+    def upload():
+        return client.post(photo, headers={**alice, "Content-Type": "image/jpeg"}, content=b"test")
+    blocked = upload()
+    assert blocked.status_code == 429 and 0 < int(blocked.headers["retry-after"]) <= 60
+    assert client.post(f"/api/trips/{trip_id}/ai/parse", headers=bob, json={"text": "晚餐 60"}).status_code == 200
+    def age_requests(hours):
+        with Session(db_engine) as session:
+            for row in session.exec(select(WebAiRequest).where(WebAiRequest.member_id == alice_id)):
+                row.at = utcnow() - timedelta(hours=hours)
+            session.commit()
+    age_requests(1)
+    assert upload().status_code == 200
+    age_requests(1)
+    assert "24 小時" in parse().json()["detail"]
+    age_requests(25)
+    assert parse().status_code == 200 and len(calls) == 4

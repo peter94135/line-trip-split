@@ -6,14 +6,14 @@
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#faf9f5" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#141413" media="(prefers-color-scheme: dark)">
-  <link rel="icon" href="/assets/logo.svg?v=17" type="image/svg+xml">
-  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png?v=17">
+  <link rel="icon" href="/assets/logo.svg?v=19" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png?v=19">
   <title>旅伴分帳</title>
-  <link rel="stylesheet" href="/assets/style.css?v=17">
+  <link rel="stylesheet" href="/assets/style.css?v=19">
   <link rel="preconnect" href="https://static.line-scdn.net">
   <link rel="preconnect" href="https://api.line.me">
   <script defer src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
-  <script type="module" src="/assets/liff.js?v=17"></script>
+  <script type="module" src="/assets/liff.js?v=19"></script>
 </head>
 <body>
   <svg class="symbols" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -31,12 +31,13 @@
     <symbol id="i-spark" viewBox="0 0 24 24"><path d="M10 3.5l1.6 4.4L16 9.5l-4.4 1.6L10 15.5l-1.6-4.4L4 9.5l4.4-1.6zM17.5 14l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z"/></symbol>
     <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></symbol>
     <symbol id="i-scale" viewBox="0 0 24 24"><path d="M12 4v16M7 20h10M5 7h14M5 7l-2.5 6a2.5 2.5 0 0 0 5 0zM19 7l-2.5 6a2.5 2.5 0 0 0 5 0z"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 10a8 8 0 1 0 0 5M20 4v6h-6"/></symbol>
     <symbol id="i-down" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></symbol>
   </svg>
   <header class="topbar"><div class="frame top-inner">
-    <button id="home" class="brand" type="button" data-action="list" aria-label="我的帳本"><img class="brand-mark" src="/assets/logo.svg?v=17" alt="" width="38" height="38">
+    <button id="home" class="brand" type="button" data-action="list" aria-label="我的帳本"><img class="brand-mark" src="/assets/logo.svg?v=19" alt="" width="38" height="38">
       <span id="trip-title" class="trip-title">旅伴分帳</span><svg class="switch-icon" aria-hidden="true"><use href="#i-down"/></svg></button>
-    <span class="top-actions"><span id="trip-status"></span><button id="refresh" class="plain" type="button" data-action="refresh" hidden>重新整理</button></span>
+    <span class="top-actions"><span id="trip-status"></span><button id="refresh" class="plain" type="button" data-action="refresh" hidden aria-label="重新整理" title="重新整理"><svg aria-hidden="true"><use href="#i-refresh"/></svg></button></span>
   </div></header>
   <main id="app" class="frame content" aria-busy="true">
     <div class="intro"><p class="eyebrow">旅程帳本</p><h1>正在開啟帳本</h1><p class="muted">請稍等片刻。</p></div>

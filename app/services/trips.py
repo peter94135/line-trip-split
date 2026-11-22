@@ -216,3 +216,11 @@ def fill_missing_rates() -> None:
                         model.amount == row.amount, model.currency == row.currency,
                     ).values(rate=rate, amount_settle=value))
             session.commit()
+
+
+def group_warning(roster: dict, count: int | None) -> str:
+    joined = sum(person.line_user_id is not None for _, person in roster.values())
+    if count is None or count == joined:
+        return ""
+    return (f"LINE 群組有 {count} 人，帳本有 {joined} 人用 LINE 加入。"
+            "請核對分攤名單。旅伴可傳「加入」，先前的分攤可在明細調整。")

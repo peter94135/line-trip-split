@@ -1,4 +1,4 @@
-import { $, api, esc, notice } from "./common.js?v=17";
+import { $, api, esc, money, notice } from "./common.js?v=19";
 
 const app = $("#app");
 const logout = $("#logout");
@@ -10,7 +10,6 @@ const CHANNELS = { line: "LINE", web: "網頁", admin: "管理頁" };
 const INBOX = { pending: "待處理", processing: "處理中", done: "完成", failed: "待核對", reviewed: "已核對" };
 const DELIVERY = { pending: "待送", sent: "已送", failed: "送出失敗" };
 
-const money = (value, currency) => `${currency} ${new Intl.NumberFormat("zh-TW", { maximumFractionDigits: 2 }).format(value)}`;
 const when = (value) => value ? new Date(value).toLocaleString("zh-TW", { hour12: false }) : "—";
 const day = (value) => value ? new Date(value).toLocaleDateString("zh-TW") : "—";
 const section = (title, content, extra = "") => `<section class="section"><div class="section-head"><h2>${title}</h2>${extra}</div><div class="card">${content}</div></section>`;
@@ -34,7 +33,7 @@ function bytes(value) {
 function tripCard(trip) {
   return `<button type="button" class="card row row-button" data-trip="${trip.id}">
     <span><strong>${esc(trip.name)}</strong>
-      <span class="line-item">#${trip.id} · ${esc(trip.creator)} 建立 · ${trip.members} 人 · ${trip.expenses} 筆支出${trip.deleted_expenses ? `（另 ${trip.deleted_expenses} 筆已刪除）` : ""}</span>
+      <span class="line-item">#${trip.id} · ${esc(trip.creator)} 建立 · ${trip.members} 人 · ${trip.expenses} 筆支出${trip.refunds ? ` · ${trip.refunds} 筆退款` : ""}${trip.deleted_expenses ? `（另 ${trip.deleted_expenses} 筆已刪除）` : ""}</span>
       <span class="line-item">最後活動 ${esc(when(trip.last_activity))}${trip.line_group ? " · 已綁定 LINE 群組" : " · 未綁定群組"}</span></span>
     <span class="amount-right">${badge(trip)}<strong class="num">${esc(money(trip.total, trip.settle_currency))}</strong></span></button>`;
 }

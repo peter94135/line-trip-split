@@ -59,6 +59,14 @@ app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")
 @app.middleware("http")
 async def cache_policy(request: Request, call_next):
     response = await call_next(request)
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self' https://static.line-scdn.net/liff/ https://static.line-scdn.net/lui/; "
+        "style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.line.me "
+        "https://access.line.me https://liff.line.me https://liffsdk.line-scdn.net; "
+        "frame-src 'self' https://access.line.me https://liff.line.me; frame-ancestors 'none'; "
+        "object-src 'none'; base-uri 'none'; form-action 'self'"
+    )
+    response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     if request.url.path.startswith("/api/") or request.url.path in ("/liff/", "/admin", "/liff/sw.js"):
         response.headers["Cache-Control"] = "no-store"

@@ -56,3 +56,9 @@ document.addEventListener("submit", () => setTimeout(clearUndo, 0), true);
 document.addEventListener("focusout", ({ target }) => {
   if (target.matches?.("input:not([type=checkbox]), textarea")) setTimeout(clearUndo, 0);
 }, true);
+
+export function money(value, currency, average = false) {
+  const digits = average && ["TWD", "JPY", "KRW", "VND"].includes(currency) ? 0 : 2;
+  const number = new Intl.NumberFormat("zh-TW", { maximumFractionDigits: digits }).format(Math.abs(value));
+  return `${Number(value) < 0 && number !== "0" ? "−" : ""}${currency} ${number}`;
+}
