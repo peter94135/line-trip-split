@@ -25,6 +25,20 @@ class AdminLogin(BaseModel):
     password: str = Field(min_length=1, max_length=512)
 
 
+class PushKeys(BaseModel):
+    p256dh: str = Field(min_length=1, max_length=200)
+    auth: str = Field(min_length=1, max_length=100)
+
+
+class PushSubscription(BaseModel):
+    endpoint: str = Field(pattern=r"^https://", max_length=2048)
+    keys: PushKeys
+
+
+class PushEndpoint(BaseModel):
+    endpoint: str = Field(min_length=1, max_length=2048)
+
+
 class JoinTrip(BaseModel):
     code: str = Field(pattern=r"^[A-Za-z0-9_-]{8}$")
 

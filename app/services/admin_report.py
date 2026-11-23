@@ -16,7 +16,7 @@ from app.models import (
     AuditLog, Expense, ExpenseShare, GeminiCall, LineDelivery, LineInbox, Member, Setting, Transfer, Trip, TripMember,
     utcnow,
 )
-from app.services import fx, gemini, line, trip_stats, trips
+from app.services import admin_push, fx, gemini, line, trip_stats, trips
 
 STARTED_AT = utcnow()
 QUOTA_TTL_S = 600
@@ -132,7 +132,8 @@ def _system(session: Session) -> dict:
 
 def overview(session: Session) -> dict:
     return {"trips": trip_rows(session), "line": _line_status(session), "gemini": _gemini_status(session),
-            "system": _system(session)}
+            "system": _system(session), "alerts": admin_push.active_alerts(session),
+            "push_devices": admin_push.subscription_count(session)}
 
 
 def trip_detail(session: Session, trip: Trip) -> dict:

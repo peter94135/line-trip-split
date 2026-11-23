@@ -3,6 +3,8 @@
 import hashlib
 import json
 import logging
+import time
+from collections import deque
 from datetime import timedelta
 from threading import Lock
 
@@ -14,13 +16,30 @@ from starlette.concurrency import run_in_threadpool
 
 from app.db import get_engine
 from app.models import LineInbox, utcnow
-from app.services import line, line_chat
+from app.services import admin_push, line, line_chat
 from app.services.line_parse import CommandError
 
 router = APIRouter()
 log = logging.getLogger(__name__)
 MAX_BODY = 1024 * 1024
 _locks = [Lock() for _ in range(64)]
+SIGNATURE_ALERT = 10  # 10 分鐘內簽章錯誤達此次數就通知管理員
+_bad_signatures: deque[float] = deque()
+_bad_lock = Lock()
+
+
+def _bad_signature() -> None:
+    now = time.monotonic()
+    with _bad_lock:
+        _bad_signatures.append(now)
+        while now - _bad_signatures[0] >= 600:
+            _bad_signatures.popleft()
+        if len(_bad_signatures) < SIGNATURE_ALERT:
+            return
+        _bad_signatures.clear()
+    admin_push.spawn(admin_push.event, "line_signature", "LINE Webhook 簽章錯誤",
+                     f"10 分鐘內收到 {SIGNATURE_ALERT} 次簽章不符的請求。可能有人在嘗試 Webhook，"
+                     "或 LINE_CHANNEL_SECRET 和 LINE Developers 的設定不一致。")
 
 
 def _store_events(events: list[dict]) -> list[str]:
@@ -109,6 +128,7 @@ async def webhook(request: Request, background: BackgroundTasks) -> dict[str, bo
         if len(body) > MAX_BODY:
             raise HTTPException(413, "Webhook 內容太大")
     if not line.verify_signature(bytes(body), request.headers.get("x-line-signature")):
+        _bad_signature()
         raise HTTPException(400, "簽章無效")
     try:
         payload = json.loads(body)

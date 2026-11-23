@@ -149,6 +149,13 @@ class AuditLog(SQLModel, table=True):
     detail: str = ""
 
 
+class AdminPushSubscription(SQLModel, table=True):
+    endpoint: str = Field(primary_key=True, max_length=2048)
+    p256dh: str = Field(max_length=200)
+    auth: str = Field(max_length=100)
+    created_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
+
+
 class WebAiRequest(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     member_id: int = Field(foreign_key="member.id", index=True)

@@ -1,4 +1,4 @@
-import { api, esc } from "./common.js?v=19";
+import { api, esc } from "./common.js?v=20";
 
 export const state = { token: "", config: null, listing: null, trip: null, tab: "ai", settleView: "settle", manualKind: "expense",
   stats: null, statsError: "", statsCategory: "", settlementDisplay: null, displayRequest: null,

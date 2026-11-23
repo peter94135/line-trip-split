@@ -12,7 +12,7 @@ from app.config import BASE_DIR, get_settings
 from app.db import init_db
 from app.models import utcnow
 from app.routers import line_webhook, web
-from app.services import line, line_delivery, trips, watchdog
+from app.services import admin_alerts, line, line_delivery, trips, watchdog
 
 
 def _app_logging() -> None:
@@ -38,6 +38,8 @@ async def lifespan(_app: FastAPI):
         scheduler.add_job(line_webhook.drain_inbox, "interval", seconds=30, next_run_time=utcnow())
         scheduler.add_job(line_delivery.retry_pending, "interval", seconds=30, next_run_time=utcnow())
         scheduler.add_job(trips.fill_missing_rates, "interval", minutes=5)
+    if get_settings().admin_password:
+        scheduler.add_job(admin_alerts.check, "interval", minutes=1, max_instances=1, coalesce=True)
     if health_url := get_settings().ts_health_url:
         scheduler.add_job(watchdog.check, "interval", seconds=15, args=[health_url])
     if scheduler.get_jobs():
@@ -68,7 +70,7 @@ async def cache_policy(request: Request, call_next):
     )
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
-    if request.url.path.startswith("/api/") or request.url.path in ("/liff/", "/admin", "/liff/sw.js"):
+    if request.url.path.startswith("/api/") or request.url.path in ("/liff/", "/admin", "/liff/sw.js", "/admin-sw.js", "/admin.webmanifest"):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "no-referrer"
     elif request.url.path.startswith("/assets/") and "v" in request.query_params and response.status_code == 200:
@@ -105,6 +107,16 @@ def service_worker() -> FileResponse:
 @app.get("/admin", include_in_schema=False)
 def admin_page() -> FileResponse:
     return FileResponse(WEB_DIR / "admin.html")
+
+
+@app.get("/admin-sw.js", include_in_schema=False)
+def admin_service_worker() -> FileResponse:
+    return FileResponse(WEB_DIR / "admin-sw.js", media_type="text/javascript")
+
+
+@app.get("/admin.webmanifest", include_in_schema=False)
+def admin_manifest() -> FileResponse:
+    return FileResponse(WEB_DIR / "admin.webmanifest", media_type="application/manifest+json")
 
 
 @app.get("/healthz")

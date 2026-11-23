@@ -1,4 +1,4 @@
-import { $, api, esc, money, notice } from "./common.js?v=19";
+import { $, api, esc, money, notice } from "./common.js?v=20";
 
 const app = $("#app");
 const logout = $("#logout");
@@ -12,12 +12,66 @@ const DELIVERY = { pending: "待送", sent: "已送", failed: "送出失敗" };
 
 const when = (value) => value ? new Date(value).toLocaleString("zh-TW", { hour12: false }) : "—";
 const day = (value) => value ? new Date(value).toLocaleDateString("zh-TW") : "—";
-const section = (title, content, extra = "") => `<section class="section"><div class="section-head"><h2>${title}</h2>${extra}</div><div class="card">${content}</div></section>`;
+const section = (title, content, extra = "", id = "") => `<section class="section"${id ? ` id="${id}"` : ""}><div class="section-head"><h2>${title}</h2>${extra}</div><div class="card">${content}</div></section>`;
 const empty = (message) => `<p class="muted small">${message}</p>`;
 const row = (left, right = "") => `<div class="row list-row"><span>${left}</span><span class="amount-right">${right}</span></div>`;
 const badge = (trip) => trip.deleted_at ? '<span class="badge closed">已刪除</span>'
   : `<span class="badge ${trip.status === "closed" ? "closed" : ""}">${trip.status === "open" ? "進行中" : "已結束"}</span>`;
 const metric = (label, value) => `<div><span>${label}</span><strong class="num">${value}</strong></div>`;
+
+const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const standalone = () => window.matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+
+function base64Bytes(value) {
+  const text = atob((value + "=".repeat((4 - value.length % 4) % 4)).replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(text, (char) => char.charCodeAt(0));
+}
+
+async function pushRegistration() {
+  return navigator.serviceWorker.register("/admin-sw.js", { scope: "/admin" });
+}
+
+async function currentSubscription() {
+  if (!pushSupported()) return null;
+  const registration = await navigator.serviceWorker.getRegistration("/admin");
+  return registration ? registration.pushManager.getSubscription() : null;
+}
+
+async function pushCard(devices) {
+  let state, actions = "";
+  if (!pushSupported()) {
+    state = /iPhone|iPad/.test(navigator.userAgent) && !standalone()
+      ? "iPhone 或 iPad 請先在 Safari 按分享鍵，選「加入主畫面」，再從主畫面打開管理頁開啟通知。"
+      : "這個瀏覽器不支援通知。請改用 Chrome、Edge、Firefox 或 Safari。";
+  } else if (Notification.permission === "denied") {
+    state = "通知已被封鎖。請在瀏覽器或系統設定允許這個網站的通知，再重新整理。";
+  } else if (await currentSubscription()) {
+    state = "這台裝置已開啟通知。";
+    actions = `<button type="button" class="secondary" data-push="test">送測試通知</button>
+      <button type="button" class="plain" data-push="off">關閉這台的通知</button>`;
+  } else {
+    state = "LINE 事件失敗、回覆送不出去、推播額度快用完、Gemini 無法使用、匯率抓不到或有人一直猜密碼時，會通知這台裝置。";
+    actions = '<button type="button" class="primary" data-push="on">開啟通知</button>';
+  }
+  return `<p class="small">${esc(state)}</p><p class="small muted">已開啟通知的裝置：${esc(devices)} 台。服務完全停止時無法通知，請另外用外部監控檢查 /healthz。</p>
+    ${actions ? `<div class="actions">${actions}</div>` : ""}`;
+}
+
+async function enablePush() {
+  if (await Notification.requestPermission() !== "granted") throw new Error("沒有取得通知權限");
+  const { public_key: key } = await api("/api/admin/push", { token });
+  const registration = await pushRegistration();
+  await navigator.serviceWorker.ready;
+  const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: base64Bytes(key) });
+  await api("/api/admin/push/subscribe", { method: "POST", token, body: subscription.toJSON() });
+}
+
+async function disablePush() {
+  const subscription = await currentSubscription();
+  if (!subscription) return;
+  await api("/api/admin/push/unsubscribe", { method: "POST", token, body: { endpoint: subscription.endpoint } });
+  await subscription.unsubscribe();
+}
 
 function showLogin() {
   token = "";
@@ -58,6 +112,8 @@ async function dashboard() {
     item.cooling_until ? `<span class="badge closed">冷卻到 ${esc(new Date(item.cooling_until * 1000).toLocaleTimeString("zh-TW", { hour12: false }))}</span>` : '<span class="badge">可用</span>')).join("");
   const usage = gemini.usage.map((item) => row(`<strong>${esc(item.model)}</strong><span class="line-item">輸入 ${esc(item.input_tokens)} · 輸出 ${esc(item.output_tokens)} tokens</span>`,
     `<strong>${esc(item.calls)} 次</strong><span class="line-item">${item.cost_usd == null ? "無價格估算" : `約 US$${esc(item.cost_usd.toFixed(4))}`}</span>`)).join("");
+  const alerts = data.alerts.map((item) => row(`<strong>${esc(item.title)}</strong><span class="line-item">${esc(item.body)}</span>`,
+    `<span class="small">${esc(when(item.since * 1000))} 起</span>`)).join("");
   const daily = gemini.daily.map((item) => row(esc(item.day), `<strong>${esc(item.calls)} 次</strong>`)).join("");
 
   app.innerHTML = `<div class="intro"><p class="eyebrow">服務管理</p><h1>旅伴分帳管理頁</h1></div>
@@ -67,12 +123,14 @@ async function dashboard() {
       ${metric("待核對事件", line.failed.length)}
       ${metric("本月推播", quota)}
     </section>
+    ${alerts ? section("目前的異常", alerts, "", "alerts") : ""}
+    ${section("通知", await pushCard(data.push_devices), "", "push")}
     <section class="section"><div class="section-head"><h2>帳本</h2><span class="small muted">點開看明細與操作紀錄</span></div>
       <div class="stack">${live.map(tripCard).join("") || empty("目前沒有帳本。")}</div></section>
     ${removed.length ? `<section class="section"><div class="section-head"><h2>已刪除的帳本</h2></div><div class="stack">${removed.map(tripCard).join("")}</div></section>` : ""}
-    ${section("LINE 待核對事件", failed || empty("目前沒有待核對事件。"))}
-    ${section("LINE 狀態", lineRows)}
-    ${section("Gemini 模型", (gemini.configured ? models : empty("尚未設定 GEMINI_API_KEY。")) + (daily ? `<h3 class="section">最近 7 天</h3>${daily}` : ""))}
+    ${section("LINE 待核對事件", failed || empty("目前沒有待核對事件。"), "", "line-failed")}
+    ${section("LINE 狀態", lineRows, "", "line-status")}
+    ${section("Gemini 模型", (gemini.configured ? models : empty("尚未設定 GEMINI_API_KEY。")) + (daily ? `<h3 class="section">最近 7 天</h3>${daily}` : ""), "", "gemini")}
     ${section("Gemini 用量 · 最近 30 天", usage || empty("目前沒有 Gemini 呼叫紀錄。"))}
     ${section("系統", [
       row("部署版本", `<strong>${esc(system.version)}</strong>`),
@@ -81,8 +139,9 @@ async function dashboard() {
       row("資料庫大小", esc(bytes(system.db_bytes))),
       row("匯率更新日", `${esc(system.fx_date || "尚未取得")}<span class="line-item">${esc(system.fx_source)}</span>`),
       row("操作紀錄", `${esc(system.audit_count)} 筆`),
-    ].join(""))}`;
-  window.scrollTo(0, 0);
+    ].join(""), "", "system")}`;
+  const target = location.hash && document.getElementById(location.hash.slice(1));
+  if (target) target.scrollIntoView(); else window.scrollTo(0, 0);
 }
 
 async function tripDetail(id) {
@@ -147,11 +206,18 @@ app.addEventListener("submit", async (event) => {
 });
 
 app.addEventListener("click", async (event) => {
-  const button = event.target.closest("button[data-review], button[data-trip], button[data-back], button[data-restore]");
+  const button = event.target.closest("button[data-review], button[data-trip], button[data-back], button[data-restore], button[data-push]");
   if (!button) return;
   button.disabled = true;
   try {
-    if (button.dataset.review) {
+    if (button.dataset.push === "test") {
+      await api("/api/admin/push/test", { method: "POST", token });
+      notice("已送出測試通知");
+    } else if (button.dataset.push) {
+      await (button.dataset.push === "on" ? enablePush() : disablePush());
+      await dashboard();
+      notice(button.dataset.push === "on" ? "已開啟通知" : "已關閉這台的通知");
+    } else if (button.dataset.review) {
       await api(`/api/admin/inbox/${button.dataset.review}/review`, { method: "POST", token });
       await dashboard();
       notice("已標為核對完成");

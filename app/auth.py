@@ -16,6 +16,7 @@ from sqlmodel import Session
 from app.config import get_settings
 from app.db import get_session
 from app.models import Member, utcnow
+from app.services import admin_push
 
 ISSUER = "trip-split"
 LINE_ISSUER = "https://access.line.me"
@@ -94,6 +95,9 @@ def admin_login(password: str) -> str:
             raise HTTPException(429, "登入嘗試過多，請稍後再試")
         if not hmac.compare_digest(expected.encode(), password.encode()):
             _admin_failures.append(now)
+            if len(_admin_failures) == 8:
+                admin_push.spawn(admin_push.event, "admin_login", "管理頁登入失敗過多",
+                                 "1 分鐘內密碼錯誤 8 次，已暫停登入。不是你的話，請考慮更換 ADMIN_PASSWORD。")
             raise HTTPException(401, "管理員密碼錯誤")
         _admin_failures.clear()
     return issue_token("admin", "admin")

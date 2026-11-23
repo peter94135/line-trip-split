@@ -105,6 +105,12 @@ Tailscale 登入狀態保存在 `tailscale-state` volume。首次登入成功後
 - 網頁依檢視、表單及設定拆分模組，網頁 API 依帳務、AI、管理分開，LINE 帳本查詢集中於 `line_reports.py`。
 - `tests/test_web_browser.py` 以模擬 LIFF 和暫存 SQLite 帳本驗證五個分頁。可使用本機 Chrome，或先執行 `.venv/bin/python -m playwright install chromium` 安裝測試瀏覽器。
 
+## 管理頁通知
+
+- 管理頁可開啟 Web Push（`app/services/admin_push.py`），通知不經 LINE、不用推播額度。VAPID 私鑰自動產生在 `data/.vapid_private.pem`（權限 600），訂閱存在 `AdminPushSubscription`，推播服務回 404 或 410 時刪除該訂閱。`sub` 用 `PUBLIC_BASE_URL`，沒有時用保留網域的 mailto。
+- `admin_alerts.check()` 在設定 `ADMIN_PASSWORD` 時每分鐘執行，檢查待核對的 LINE 事件、卡住 10 分鐘或近 24 小時失敗的補送、超過一天仍待換算的外幣紀錄、Gemini 全部模型冷卻，以及推播額度 80% 與 100%。持續性異常在開始、數量增加且滿一小時、恢復時通知，狀態存在 `Setting` 的 `admin_alert:*`，管理頁列出目前的異常。管理頁登入 1 分鐘失敗 8 次、Webhook 10 分鐘簽章錯誤 10 次是單次事件，每類每小時最多一則，在背景執行緒送出。
+- 通知內容只寫摘要，不含帳本、成員或金額。點通知開啟 `/admin#區塊`。Service worker 是 `/admin-sw.js`（scope `/admin`，不快取），iOS 從主畫面開啟要用 `/admin.webmanifest`。服務停止時由外部監控檢查 `/healthz`。
+
 ## 開發驗證
 
 ```sh

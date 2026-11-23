@@ -1,5 +1,5 @@
-import { $, esc } from "./common.js?v=19";
-import { state, call, endpoint, currencyField, currencyOptions, memberOptions } from "./liff-shared.js?v=19";
+import { $, esc } from "./common.js?v=20";
+import { state, call, endpoint, currencyField, currencyOptions, memberOptions } from "./liff-shared.js?v=20";
 
 export function recordInfo(entry) {
   if (!entry?.created_at) return "";
