@@ -1,5 +1,5 @@
-import { esc, money } from "./common.js?v=20";
-import { state, button, categoryLabel, empty, icon, isOpen, nameOf } from "./liff-shared.js?v=20";
+import { esc, money } from "./common.js?v=21";
+import { state, button, categoryLabel, empty, icon, isOpen, nameOf } from "./liff-shared.js?v=21";
 
 function settlementPanel() {
   const trip = state.trip;

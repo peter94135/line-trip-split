@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.5-flash"
     gemini_thinking_level: str = "minimal"
     gemini_timeout_s: int = Field(default=25, gt=0)
-    gemini_fallback_models: str = "gemini-3-flash-preview,gemini-3.5-flash-lite,gemini-3.1-flash-lite"
+    gemini_fallback_models: str = "gemini-3.5-flash-lite,gemini-3.1-flash-lite"
     public_base_url: str = ""
     trip_summary_push: bool = False
     ts_health_url: str = ""  # Compose 內設定；留空則不監看 sidecar

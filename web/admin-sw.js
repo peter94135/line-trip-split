@@ -9,7 +9,7 @@ self.addEventListener("push", (event) => {
     body: data.body || "",
     tag: data.tag || "admin",
     renotify: true,
-    icon: "/assets/apple-touch-icon.png?v=20",
+    icon: "/assets/apple-touch-icon.png?v=21",
     data: { url: data.url || "/admin" },
   }));
 });

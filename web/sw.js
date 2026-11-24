@@ -1,6 +1,6 @@
-const CACHE = "trip-split-assets-v20";
-const ASSETS = ["/assets/style.css?v=20", "/assets/common.js?v=20", "/assets/liff.js?v=20",
-  "/assets/liff-fields.js?v=20", "/assets/liff-ledger.js?v=20", "/assets/liff-settings.js?v=20", "/assets/liff-shared.js?v=20"];
+const CACHE = "trip-split-assets-v21";
+const ASSETS = ["/assets/style.css?v=21", "/assets/common.js?v=21", "/assets/liff.js?v=21",
+  "/assets/liff-fields.js?v=21", "/assets/liff-ledger.js?v=21", "/assets/liff-settings.js?v=21", "/assets/liff-shared.js?v=21"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(ASSETS)).then(() => self.skipWaiting()));

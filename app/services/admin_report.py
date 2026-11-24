@@ -103,11 +103,13 @@ def _gemini_status(session: Session) -> dict:
     models = []
     for model in gemini._models():
         row = session.get(Setting, f"gemini_model:{model}")
-        retry_at = json.loads(row.value).get("retry_at", 0) if row else 0
-        models.append({"model": model, "cooling_until": retry_at if retry_at > time.time() else None})
+        stat = json.loads(row.value) if row else {}
+        retry_at = stat.get("retry_at", 0)
+        models.append({"model": model, "label": gemini.label(model), "missing": stat.get("status") == 404,
+                       "cooling_until": retry_at if retry_at > time.time() else None})
     return {
         "configured": bool(get_settings().gemini_api_key),
-        "usage": [dict(model=model, calls=calls, input_tokens=inputs, output_tokens=outputs, cost_usd=cost)
+        "usage": [dict(model=model, label=gemini.label(model), calls=calls, input_tokens=inputs, output_tokens=outputs, cost_usd=cost)
                   for model, calls, inputs, outputs, cost in usage],
         "daily": [{"day": day, "calls": daily[day]} for day in sorted(daily)],
         "models": models,

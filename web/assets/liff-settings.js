@@ -1,5 +1,5 @@
-import { $, esc, notice } from "./common.js?v=20";
-import { state, isOpen, dates, button, nameOf, currencyField, currencyOptions } from "./liff-shared.js?v=20";
+import { $, esc, notice } from "./common.js?v=21";
+import { state, isOpen, dates, button, nameOf, currencyField, currencyOptions } from "./liff-shared.js?v=21";
 
 const dialog = $("#dialog");
 

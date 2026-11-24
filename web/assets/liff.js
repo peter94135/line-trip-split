@@ -1,8 +1,8 @@
-import { state, icon, endpoint, call, isOpen, nameOf, statusBadge, dates, heading, button } from "./liff-shared.js?v=20";
-import { aiView, settleView, expenseList, expenseRows, balanceBreakdown } from "./liff-ledger.js?v=20";
-import { tripView, rateRow, invite } from "./liff-settings.js?v=20";
-import { recordInfo, expenseFields, wireExpenseForm, readExpense, transferFields } from "./liff-fields.js?v=20";
-import { $, api, clearUndo, esc, money, notice, storage } from "./common.js?v=20";
+import { state, icon, endpoint, call, isOpen, nameOf, statusBadge, dates, heading, button } from "./liff-shared.js?v=21";
+import { aiView, settleView, expenseList, expenseRows, balanceBreakdown } from "./liff-ledger.js?v=21";
+import { tripView, rateRow, invite } from "./liff-settings.js?v=21";
+import { recordInfo, expenseFields, wireExpenseForm, readExpense, transferFields } from "./liff-fields.js?v=21";
+import { $, api, clearUndo, esc, money, notice, storage } from "./common.js?v=21";
 
 const TOKEN_KEY = "trip-split:token";
 const LINE_USER_KEY = "trip-split:line-user";

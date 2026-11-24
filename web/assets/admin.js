@@ -1,4 +1,4 @@
-import { $, api, esc, money, notice } from "./common.js?v=20";
+import { $, api, esc, money, notice } from "./common.js?v=21";
 
 const app = $("#app");
 const logout = $("#logout");
@@ -108,9 +108,11 @@ async function dashboard() {
     ...Object.entries(line.delivery).map(([status, count]) => row(`回覆補送 · ${esc(DELIVERY[status] || status)}`, `<strong>${esc(count)} 筆</strong>`)),
     row("本月推播額度", `<strong>${esc(quota)}</strong>`),
   ].join("");
-  const models = gemini.models.map((item) => row(`<strong>${esc(item.model)}</strong>`,
-    item.cooling_until ? `<span class="badge closed">冷卻到 ${esc(new Date(item.cooling_until * 1000).toLocaleTimeString("zh-TW", { hour12: false }))}</span>` : '<span class="badge">可用</span>')).join("");
-  const usage = gemini.usage.map((item) => row(`<strong>${esc(item.model)}</strong><span class="line-item">輸入 ${esc(item.input_tokens)} · 輸出 ${esc(item.output_tokens)} tokens</span>`,
+  const modelName = (item) => `<strong>${esc(item.label || item.model)}</strong>${item.label && item.label !== item.model ? `<span class="line-item">${esc(item.model)}</span>` : ""}`;
+  const models = gemini.models.map((item) => row(modelName(item),
+    item.missing && item.cooling_until ? '<span class="badge closed">找不到模型</span>'
+      : item.cooling_until ? `<span class="badge closed">冷卻到 ${esc(new Date(item.cooling_until * 1000).toLocaleTimeString("zh-TW", { hour12: false }))}</span>` : '<span class="badge">可用</span>')).join("");
+  const usage = gemini.usage.map((item) => row(`${modelName(item)}<span class="line-item">輸入 ${esc(item.input_tokens)} · 輸出 ${esc(item.output_tokens)} tokens</span>`,
     `<strong>${esc(item.calls)} 次</strong><span class="line-item">${item.cost_usd == null ? "無價格估算" : `約 US$${esc(item.cost_usd.toFixed(4))}`}</span>`)).join("");
   const alerts = data.alerts.map((item) => row(`<strong>${esc(item.title)}</strong><span class="line-item">${esc(item.body)}</span>`,
     `<span class="small">${esc(when(item.since * 1000))} 起</span>`)).join("");

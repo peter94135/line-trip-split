@@ -357,6 +357,8 @@ def test_admin_scope_overview_and_review(web, db_engine):
     assert client.get("/api/trips", headers=admin).status_code == 401
     data = client.get("/api/admin/overview", headers=admin).json()
     assert data["trips"][0]["name"] == "京都" and data["trips"][0]["members"] >= 1
+    assert data["gemini"]["usage"][0]["label"] == "gemini-test"
+    assert data["gemini"]["models"][0]["label"] == "Gemini 3.6 Flash"
     assert data["gemini"]["usage"][0]["input_tokens"] == 10 and data["gemini"]["daily"][0]["calls"] >= 1
     assert data["line"]["failed"][0]["type"] == "message" and "private" not in str(data["line"]["failed"])
     assert data["system"]["db_bytes"] > 0

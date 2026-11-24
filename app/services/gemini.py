@@ -26,14 +26,25 @@ IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/hei
 _lock = Lock()
 _shared: genai.Client | None = None
 _PRICES = {  # 每百萬 token 的美元單價，依序為一般輸入、快取輸入、輸出。
-    "gemini-3-flash-preview": (0.50, 0.05, 3.00),
     "gemini-3.5-flash-lite": (0.30, 0.03, 2.50),
     "gemini-3.1-flash-lite": (0.25, 0.025, 1.50),
 }
+# AI Studio Rate Limit 頁上的名字。gemini-3.5-flash 的額度算在 Gemini 3.6 Flash。
+LABELS = {
+    "gemini-3.5-flash": "Gemini 3.6 Flash",
+    "gemini-3.6-flash": "Gemini 3.6 Flash",
+    "gemini-3.5-flash-lite": "Gemini 3.5 Flash Lite",
+    "gemini-3.1-flash-lite": "Gemini 3.1 Flash Lite",
+}
+MISSING_COOLDOWN_S = 6 * 3600  # 模型不存在（已下架或名字打錯）時，先跳過一段時間
 
 
 class GeminiError(RuntimeError):
     pass
+
+
+def label(model: str) -> str:
+    return LABELS.get(model, model)
 
 
 class ShareItem(BaseModel):
@@ -175,9 +186,11 @@ def _record(model: str, *, code: int, started: float, delay: float = 0, usage=No
 def _generate(parts: list[str | types.Part], thinking: str, *, schema: type[BaseModel] = TripParse,
               system: str = SYSTEM_PROMPT, kind: str = "TripParse"):
     client = _client()
+    tried, missing = 0, 0
     for model in _models():
         if _cooling(model):
             continue
+        tried += 1
         config = dict(system_instruction=system, response_mime_type="application/json", response_schema=schema)
         if thinking:
             config["thinking_config"] = types.ThinkingConfig(thinking_level=thinking)
@@ -187,10 +200,15 @@ def _generate(parts: list[str | types.Part], thinking: str, *, schema: type[Base
                 result = client.models.generate_content(model=model, contents=parts, config=types.GenerateContentConfig(**config))
             except errors.APIError as exc:
                 code = exc.code or 0
-                _record(model, code=code, started=started, delay=_retry_delay(exc) if code == 429 else 0, kind=kind)
+                delay = _retry_delay(exc) if code == 429 else MISSING_COOLDOWN_S if code == 404 else 0
+                _record(model, code=code, started=started, delay=delay, kind=kind)
                 if code == 400 and "thinking" in str(exc.message).lower() and config.pop("thinking_config", None):
                     continue
-                if code in (404, 408, 429) or code >= 500:
+                if code == 404:
+                    missing += 1
+                    log.warning("Gemini 找不到模型 %s（%s），可能已下架，改試下一個模型", model, label(model))
+                    break
+                if code in (408, 429) or code >= 500:
                     break
                 log.warning("Gemini 拒絕請求，模型 %s，HTTP %s", model, code)
                 raise GeminiError("Gemini 目前無法解析，請稍後再試。") from exc
@@ -204,6 +222,8 @@ def _generate(parts: list[str | types.Part], thinking: str, *, schema: type[Base
                 return schema.model_validate_json(result.text or "")
             except ValueError:
                 break
+    if tried and missing == tried:
+        raise GeminiError("設定的 Gemini 模型都找不到，可能已下架，請架設者更新 GEMINI_MODEL。")
     raise GeminiError("Gemini 目前無法解析，請稍後再試或改用單筆文字記帳。")
 
 
